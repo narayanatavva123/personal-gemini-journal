@@ -1,0 +1,73 @@
+{
+  "entities": {
+    "interaction": {
+      "title": "Journal Interaction",
+      "description": "A user's journal entry and Gemini reflection payload.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for the journal entry or interaction"
+        },
+        "userId": {
+          "type": "string",
+          "description": "UID of the owner"
+        },
+        "type": {
+          "type": "string",
+          "description": "Type of interaction, e.g. journal_entry"
+        },
+        "title": {
+          "type": "string",
+          "description": "Title of the journal entry"
+        },
+        "content": {
+          "type": "string",
+          "description": "Content written by the user"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation ISO timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Update ISO timestamp"
+        },
+        "mood": {
+          "type": "string",
+          "description": "Selected mood state"
+        },
+        "tags": {
+          "type": "array",
+          "description": "Tags associated with the entry"
+        },
+        "isFavorite": {
+          "type": "boolean",
+          "description": "Whether entry is marked favorite"
+        },
+        "wordCount": {
+          "type": "number",
+          "description": "Word count of the entry"
+        },
+        "reflection": {
+          "type": "object",
+          "description": "Gemini reflection data"
+        },
+        "savedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server save timestamp"
+        }
+      },
+      "required": ["id", "userId", "type", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/interactions/{interactionId}": {
+      "schema": "interaction",
+      "description": "Owner-bound private journal reflections and Gemini interactions"
+    }
+  }
+}
