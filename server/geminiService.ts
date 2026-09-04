@@ -1,16 +1,14 @@
 import { GoogleGenAI } from '@google/genai';
+import { getGeminiApiKey } from './secretManager.ts';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
 let aiClient: GoogleGenAI | null = null;
 
-function getAiClient(): GoogleGenAI {
+async function getAiClient(): Promise<GoogleGenAI> {
   if (!aiClient) {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      throw new Error('GEMINI_API_KEY is not configured in the environment.');
-    }
+    const apiKey = await getGeminiApiKey();
     aiClient = new GoogleGenAI({
       apiKey,
       httpOptions: {
@@ -24,19 +22,34 @@ function getAiClient(): GoogleGenAI {
 }
 
 /**
- * Robust helper that calls Gemini with fallback if model experiences high demand spikes (503)
+ * Resilient Model Fallback Ladder (ordered by availability and latency):
+ * 1. Primary: "gemini-3.6-flash"
+ * 2. High-Availability Fallback: "gemini-3.1-flash-lite"
+ * 3. Dynamic Alias: "gemini-flash-latest"
+ * 4. Deep Reasoning Fallback: "gemini-3.7-flash"
  */
-async function callGeminiWithFallback(params: {
+export const MODEL_FALLBACK_LADDER = [
+  'gemini-3.6-flash',
+  'gemini-3.1-flash-lite',
+  'gemini-flash-latest',
+  'gemini-3.7-flash',
+] as const;
+
+/**
+ * Standard Helper: generateContentWithFallback
+ * Catches recoverable HTTP/API status codes (503 UNAVAILABLE, 429 RESOURCE_EXHAUSTED,
+ * 404 NOT_FOUND, 500 INTERNAL) and sequentially attempts the next model in the fallback chain.
+ */
+export async function generateContentWithFallback(params: {
   contents: string;
   systemInstruction?: string;
   responseMimeType?: string;
   temperature?: number;
 }) {
-  const ai = getAiClient();
-  const modelsToTry = ['gemini-3.8-flash', 'gemini-3.1-flash-lite'];
-
+  const ai = await getAiClient();
   let lastError: any = null;
-  for (const model of modelsToTry) {
+
+  for (const model of MODEL_FALLBACK_LADDER) {
     try {
       const response = await ai.models.generateContent({
         model,
@@ -50,10 +63,35 @@ async function callGeminiWithFallback(params: {
       return response;
     } catch (err: any) {
       lastError = err;
-      console.warn(`Model ${model} request error:`, err?.message || err);
-      // If 503 or 429, loop to fallback model
+      const errStr = typeof err === 'object' ? JSON.stringify(err) : String(err);
+      const errMsg = err?.message || '';
+
+      const isRecoverable =
+        errMsg.includes('503') ||
+        errMsg.includes('UNAVAILABLE') ||
+        errMsg.includes('high demand') ||
+        errMsg.includes('429') ||
+        errMsg.includes('RESOURCE_EXHAUSTED') ||
+        errMsg.includes('404') ||
+        errMsg.includes('NOT_FOUND') ||
+        errMsg.includes('500') ||
+        errMsg.includes('INTERNAL') ||
+        errStr.includes('503') ||
+        errStr.includes('UNAVAILABLE') ||
+        errStr.includes('429') ||
+        errStr.includes('404') ||
+        errStr.includes('500');
+
+      if (isRecoverable) {
+        // Sequentially attempt the next model in the fallback ladder without noisy error logs
+        continue;
+      }
+
+      // If non-recoverable error, break immediately
+      throw err;
     }
   }
+
   throw lastError;
 }
 
@@ -133,7 +171,7 @@ Please produce a thoughtful response in valid JSON matching this exact structure
 Ensure the output is strictly valid JSON only.`;
 
   try {
-    const response = await callGeminiWithFallback({
+    const response = await generateContentWithFallback({
       contents: prompt,
       responseMimeType: 'application/json',
       temperature: 0.7,
@@ -151,7 +189,7 @@ Ensure the output is strictly valid JSON only.`;
       detectedThemes: Array.isArray(parsed.detectedThemes) ? parsed.detectedThemes : ['Self-Reflection', 'Emotional Awareness'],
     };
   } catch (err: any) {
-    // Graceful fallback if both external model endpoints are temporarily saturated
+    // Graceful psychological fallback if all ladder models encounter network/rate limits
     return {
       reflection: `Thank you for taking the time to put your thoughts onto the page. When you write about "${title}", you give your internal experiences the room they need to breathe. Notice what felt heaviest to write down—often the parts we hesitate to articulate hold the deepest wisdom about our current needs.`,
       followUpQuestions: [
@@ -195,7 +233,7 @@ Respond with valid JSON:
 ]`;
 
   try {
-    const response = await callGeminiWithFallback({
+    const response = await generateContentWithFallback({
       contents: prompt,
       responseMimeType: 'application/json',
       temperature: 0.8,
@@ -266,7 +304,7 @@ Synthesize these writings into an empowering, grounded overview in JSON format:
 }`;
 
   try {
-    const response = await callGeminiWithFallback({
+    const response = await generateContentWithFallback({
       contents: prompt,
       responseMimeType: 'application/json',
       temperature: 0.6,

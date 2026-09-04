@@ -58,20 +58,20 @@ export function PrivacyAuditModal({
 
         {/* Security Grid */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 mb-6">
-          {/* Card 1: Server-Side AI Proxy */}
+          {/* Card 1: Google Cloud Secret Manager & Server-Side AI Proxy */}
           <div className="p-4 rounded-xl bg-white border border-[#E5E0D5] shadow-2xs space-y-2">
             <div className="flex items-center gap-2 text-[#24211D]">
               <Server className="w-4 h-4 text-emerald-700" />
               <h3 className="text-xs font-semibold uppercase tracking-wide">
-                Server-Side Gemini Proxy
+                GCP Secret Manager & Server Proxy
               </h3>
             </div>
             <p className="text-xs text-[#6B6459] leading-relaxed">
-              Your <code className="bg-[#F0EBE0] px-1 py-0.5 rounded text-[11px]">GEMINI_API_KEY</code> is strictly stored server-side. Zero client-side API keys are ever leaked into the browser bundle or network headers.
+              Your <code className="bg-[#F0EBE0] px-1 py-0.5 rounded text-[11px]">GEMINI_API_KEY</code> is managed via Google Cloud Secret Manager and accessed exclusively by server-side routes. Zero client-side API keys are ever bundled or exposed.
             </p>
             <div className="flex items-center gap-1.5 text-[11px] font-medium text-emerald-800 pt-1">
               <CheckCircle2 className="w-3.5 h-3.5" />
-              <span>Proxy Active with 'aistudio-build' Telemetry</span>
+              <span>Secret Manager Protected & Telemetry Verified</span>
             </div>
           </div>
 

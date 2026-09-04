@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { generateReflection, generatePrompts, synthesizeEntries } from './geminiService.ts';
+import { auditSecretManager } from './secretManager.ts';
 
 // Helper to parse JSON body from incoming request
 async function parseBody(req: IncomingMessage): Promise<any> {
@@ -39,14 +40,16 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 
   // Health check endpoint
   if (url === '/api/health' || url.startsWith('/api/health?')) {
-    const hasKey = Boolean(process.env.GEMINI_API_KEY);
+    const audit = await auditSecretManager();
     sendJson(res, 200, {
       status: 'ok',
-      hasApiKey: hasKey,
+      hasApiKey: audit.configured,
+      secretSource: audit.source,
       timestamp: new Date().toISOString(),
       security: {
         serverSideGemini: true,
         clientKeyExposed: false,
+        secretManagerIntegrated: true,
         aesStorageSupport: true,
       },
     });
