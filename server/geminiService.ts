@@ -41,7 +41,7 @@ export const MODEL_FALLBACK_LADDER = [
  * 404 NOT_FOUND, 500 INTERNAL) and sequentially attempts the next model in the fallback chain.
  */
 export async function generateContentWithFallback(params: {
-  contents: string;
+  contents: any;
   systemInstruction?: string;
   responseMimeType?: string;
   temperature?: number;
@@ -189,6 +189,11 @@ Ensure the output is strictly valid JSON only.`;
       detectedThemes: Array.isArray(parsed.detectedThemes) ? parsed.detectedThemes : ['Self-Reflection', 'Emotional Awareness'],
     };
   } catch (err: any) {
+    // If it is a Secret Manager or credentials configuration error, do NOT mask it as a generated reflection
+    if (err?.message?.includes('Secret Manager') || err?.message?.includes('GEMINI_API_KEY') || err?.message?.includes('Security Policy')) {
+      throw err;
+    }
+
     // Graceful psychological fallback if all ladder models encounter network/rate limits
     return {
       reflection: `Thank you for taking the time to put your thoughts onto the page. When you write about "${title}", you give your internal experiences the room they need to breathe. Notice what felt heaviest to write down—often the parts we hesitate to articulate hold the deepest wisdom about our current needs.`,
@@ -322,3 +327,131 @@ Synthesize these writings into an empowering, grounded overview in JSON format:
     };
   }
 }
+
+export interface ChatTurnMessage {
+  role: 'user' | 'model';
+  content: string;
+}
+
+export interface ContinueConversationRequest {
+  entryId: string;
+  entryTitle?: string;
+  entryText: string;
+  initialReflection?: string;
+  history?: ChatTurnMessage[];
+  message: string;
+  mode?: string;
+}
+
+/**
+ * Multi-turn reflective dialogue with Gemini.
+ * Retains full context of original journal entry, initial reflection, and turn history.
+ */
+export async function continueReflectionDialogue(req: ContinueConversationRequest): Promise<{
+  reply: string;
+  timestamp: string;
+}> {
+  const {
+    entryTitle = 'Untitled',
+    entryText,
+    initialReflection,
+    history = [],
+    message,
+    mode = 'deep-reflection',
+  } = req;
+
+  // Build the conversation turns array
+  const contents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [];
+
+  // Turn 1: Initial context and entry
+  contents.push({
+    role: 'user',
+    parts: [
+      {
+        text: `Here is my private journal entry:
+Title: "${entryTitle}"
+Content:
+"""
+${entryText}
+"""
+
+Please share your initial reflection on this entry.`,
+      },
+    ],
+  });
+
+  // Model initial reflection turn
+  if (initialReflection && initialReflection.trim()) {
+    contents.push({
+      role: 'model',
+      parts: [
+        {
+          text: initialReflection.trim(),
+        },
+      ],
+    });
+  } else {
+    contents.push({
+      role: 'model',
+      parts: [
+        {
+          text: 'Thank you for opening your journal and sharing these honest thoughts with me. I am here to explore them with you.',
+        },
+      ],
+    });
+  }
+
+  // Intermediate turns from history
+  for (const turn of history) {
+    if (turn && typeof turn.content === 'string' && turn.content.trim()) {
+      contents.push({
+        role: turn.role === 'model' ? 'model' : 'user',
+        parts: [{ text: turn.content.trim() }],
+      });
+    }
+  }
+
+  // Current turn: user's follow-up question
+  contents.push({
+    role: 'user',
+    parts: [{ text: message.trim() }],
+  });
+
+  const systemInstruction = `You are a trusted, warm, and psychologically perceptive personal journaling companion holding an ongoing, reflective multi-turn dialogue with the author of this private journal.
+
+Core Persona & Boundaries:
+- You are an empathetic, non-judgmental reflective journaling companion, NOT a therapist, psychiatrist, clinical psychologist, counselor, or medical healthcare provider.
+- Never diagnose mental health disorders, prescribe medical treatments, or deliver clinical therapy.
+- If the author expresses self-harm, suicidal ideation, or extreme acute crisis, provide immediate compassionate care and urge connecting with verified crisis support (such as dialing or texting 988 in the US/Canada or local emergency services), while holding space with warmth.
+- Maintain conversational continuity: retain deep contextual awareness of the original journal entry, your previous reflections, and every turn in this dialogue.
+- Speak directly to the author ('you'). Keep your tone warm, grounded, perceptive, and focused on personal clarity, self-discovery, and emotional validation.
+- Avoid robotic replies, generic platitudes, or toxic positivity. Keep your response focused, insightful, and conversational (typically 1 to 3 thoughtful paragraphs).
+${mode ? `Style focus: ${mode}.` : ''}`;
+
+  try {
+    const response = await generateContentWithFallback({
+      contents,
+      systemInstruction,
+      temperature: 0.7,
+    });
+
+    const replyText =
+      response?.text?.trim() ||
+      'I hear what you are saying, and I am holding space for what you shared. What feels most present for you right now?';
+
+    return {
+      reply: replyText,
+      timestamp: new Date().toISOString(),
+    };
+  } catch (err: any) {
+    if (err?.message?.includes('Secret Manager') || err?.message?.includes('GEMINI_API_KEY') || err?.message?.includes('Security Policy')) {
+      throw err;
+    }
+    console.warn('Gemini multi-turn conversation fallback triggered:', err?.message || err);
+    return {
+      reply: `Thank you for asking about that. Looking at your entry and reflection together, this touches on something meaningful in your experience. Take a moment to notice what thought or sensation feels strongest right now as you consider this question.`,
+      timestamp: new Date().toISOString(),
+    };
+  }
+}
+

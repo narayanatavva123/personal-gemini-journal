@@ -1,9 +1,17 @@
 import type { IncomingMessage, ServerResponse } from 'http';
-import { generateReflection, generatePrompts, synthesizeEntries } from './geminiService.ts';
+import {
+  generateReflection,
+  generatePrompts,
+  synthesizeEntries,
+  continueReflectionDialogue,
+} from './geminiService.ts';
 import { auditSecretManager, getEmailNotificationConfig } from './secretManager.ts';
 import { reverseGeocode } from './locationService.ts';
-import { verifyAuthToken, verifyAdminUser } from './firebaseAdmin.ts';
+import { verifyAuthToken, verifyAdminUser, getAdminFirestore } from './firebaseAdmin.ts';
 import { getAdminAggregateStats } from './adminService.ts';
+
+// In-memory rate limiting map for multi-turn chat: uid -> timestamp
+const recentChatRequests = new Map<string, number>();
 import {
   getUserNotificationSettings,
   saveUserNotificationSettings,
@@ -80,6 +88,142 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
       console.error('Error in /api/gemini/reflect:', err);
       sendJson(res, 500, {
         error: err.message || 'Failed to generate reflection with Gemini',
+      });
+    }
+    return true;
+  }
+
+  // Multi-Turn Gemini Reflection Chat
+  // Requirements: Authenticated user, server-side token verification, input validation, rate-limiting, owner-bound persistence
+  if (url === '/api/gemini/chat' && method === 'POST') {
+    try {
+      // 1. Authenticate user
+      const user = await verifyAuthToken(req);
+      if (!user) {
+        sendJson(res, 401, {
+          error: 'Authentication required: Please sign in with Firebase to continue your reflection dialogue.',
+        });
+        return true;
+      }
+
+      // 2. Parse and validate body
+      const body = await parseBody(req);
+      const message = typeof body.message === 'string' ? body.message.trim() : '';
+      if (!message) {
+        sendJson(res, 400, { error: 'A non-empty question or message is required.' });
+        return true;
+      }
+      if (message.length > 5000) {
+        sendJson(res, 400, { error: 'Message exceeds the 5,000 character limit.' });
+        return true;
+      }
+
+      const entryText = typeof body.entryText === 'string' ? body.entryText.trim() : '';
+      if (!entryText) {
+        sendJson(res, 400, { error: 'Journal entry context is required for reflection dialogue.' });
+        return true;
+      }
+
+      // 3. Rate limiting & duplicate prevention (minimum 800ms between submissions per user)
+      const now = Date.now();
+      const lastRequest = recentChatRequests.get(user.uid) || 0;
+      if (now - lastRequest < 800) {
+        sendJson(res, 429, {
+          error: 'Please allow Gemini a moment to finish processing before sending another message.',
+        });
+        return true;
+      }
+      recentChatRequests.set(user.uid, now);
+
+      // 4. Multi-turn dialogue with Gemini SDK
+      const dialogueResult = await continueReflectionDialogue({
+        entryId: body.entryId || `entry-${Date.now()}`,
+        entryTitle: body.entryTitle,
+        entryText,
+        initialReflection: body.initialReflection,
+        history: Array.isArray(body.history) ? body.history : [],
+        message,
+        mode: body.mode,
+      });
+
+      // 5. Structure conversation record and persist owner-bound under users/{uid}/...
+      const entryId = body.entryId || `entry-${Date.now()}`;
+      const conversationId = body.conversationId || `conv-${entryId}`;
+
+      // Assemble full message turns
+      const prevMessages = Array.isArray(body.messages)
+        ? body.messages
+        : Array.isArray(body.history)
+        ? body.history.map((h: any, i: number) => ({
+            id: `msg-hist-${i}`,
+            role: h.role,
+            content: h.content,
+            timestamp: new Date().toISOString(),
+          }))
+        : [];
+
+      const userTurn = {
+        id: `msg-${Date.now()}-user`,
+        role: 'user' as const,
+        content: message,
+        timestamp: new Date().toISOString(),
+      };
+
+      const modelTurn = {
+        id: `msg-${Date.now() + 1}-model`,
+        role: 'model' as const,
+        content: dialogueResult.reply,
+        timestamp: dialogueResult.timestamp,
+      };
+
+      const updatedMessages = [...prevMessages, userTurn, modelTurn];
+      const conversationData = {
+        id: conversationId,
+        userId: user.uid,
+        entryId,
+        messages: updatedMessages,
+        createdAt: body.conversationCreatedAt || new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      // Server-side persistence via Admin Firestore (silent fallback to memory/client)
+      try {
+        const db = getAdminFirestore();
+
+        // 1. Conceptual subcollection: users/{uid}/entries/{entryId}/reflectionConversation/{conversationId}
+        await db
+          .collection('users')
+          .doc(user.uid)
+          .collection('entries')
+          .doc(entryId)
+          .collection('reflectionConversation')
+          .doc(conversationId)
+          .set(conversationData, { merge: true })
+          .catch(() => {});
+
+        // 2. Production subcollection: users/{uid}/interactions/{entryId}/reflectionConversation/{conversationId}
+        await db
+          .collection('users')
+          .doc(user.uid)
+          .collection('interactions')
+          .doc(entryId)
+          .collection('reflectionConversation')
+          .doc(conversationId)
+          .set(conversationData, { merge: true })
+          .catch(() => {});
+      } catch (saveErr) {
+        console.warn('Admin Firestore conversation write skipped:', saveErr);
+      }
+
+      sendJson(res, 200, {
+        reply: dialogueResult.reply,
+        timestamp: dialogueResult.timestamp,
+        conversation: conversationData,
+      });
+    } catch (err: any) {
+      console.error('Error in /api/gemini/chat:', err);
+      sendJson(res, 500, {
+        error: err.message || 'Failed to generate conversational reflection response',
       });
     }
     return true;
@@ -180,6 +324,17 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
         isAdmin: false,
         error: err.message || 'Access Denied: Administrator role required',
       });
+    }
+    return true;
+  }
+
+  // Secret Manager Security Audit endpoint
+  if (url === '/api/admin/audit/secret-manager' && method === 'GET') {
+    try {
+      const audit = await auditSecretManager();
+      sendJson(res, 200, audit);
+    } catch (err: any) {
+      sendJson(res, 500, { error: err.message || 'Audit check failed' });
     }
     return true;
   }

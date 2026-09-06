@@ -169,12 +169,54 @@
         }
       },
       "required": ["eventType", "timestamp"]
+    },
+    "reflectionConversation": {
+      "title": "Reflection Conversation",
+      "description": "Owner-bound multi-turn reflection dialogue with Gemini.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for the conversation session"
+        },
+        "userId": {
+          "type": "string",
+          "description": "UID of the owner"
+        },
+        "entryId": {
+          "type": "string",
+          "description": "ID of the parent journal entry"
+        },
+        "messages": {
+          "type": "array",
+          "description": "List of conversation turns with role and content"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Update timestamp"
+        }
+      },
+      "required": ["id", "userId", "entryId", "messages", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
     "/users/{userId}/interactions/{interactionId}": {
       "schema": "interaction",
       "description": "Owner-bound private journal reflections and Gemini interactions"
+    },
+    "/users/{userId}/interactions/{interactionId}/reflectionConversation/{conversationId}": {
+      "schema": "reflectionConversation",
+      "description": "Owner-bound multi-turn conversation subcollection for journal interaction"
+    },
+    "/users/{userId}/entries/{entryId}/reflectionConversation/{conversationId}": {
+      "schema": "reflectionConversation",
+      "description": "Owner-bound conceptual path for multi-turn reflection conversation"
     },
     "/users/{userId}/settings/notifications": {
       "schema": "userNotificationSettings",

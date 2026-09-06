@@ -17,6 +17,7 @@ import {
   loadEntries,
   saveEntries,
   calculateStreak,
+  deduplicateAndSanitizeEntries,
 } from './utils/storage.ts';
 import {
   subscribeToAuth,
@@ -25,8 +26,11 @@ import {
   fetchUserInteractions,
   deleteInteractionFromFirestore,
   fetchNotificationSettingsFromFirestore,
+  checkUserInitializedInFirestore,
+  markUserInitializedInFirestore,
 } from './utils/firebase.ts';
 import { checkUserRole, triggerNotificationEvent, saveNotificationSettings } from './utils/apiClient.ts';
+import { htmlToMarkdown } from './utils/richText.ts';
 import { Lock, RefreshCw, BookOpen } from 'lucide-react';
 
 export default function App() {
@@ -53,6 +57,7 @@ export default function App() {
 
   // Inactivity tracking
   const lastActiveRef = useRef<number>(Date.now());
+  const syncInProgressRef = useRef<boolean>(false);
 
   // Subscribe to Firebase Auth changes
   useEffect(() => {
@@ -70,26 +75,40 @@ export default function App() {
             console.warn('Role verification pass:', err);
           });
 
-        // Authenticated user: Load owner-bound Firestore data
+        // Authenticated user: Load owner-bound Firestore data safely
+        if (syncInProgressRef.current) return;
+        syncInProgressRef.current = true;
         setIsSyncing(true);
         try {
+          const isInitialized = await checkUserInitializedInFirestore(user.uid);
           const firestoreEntries = await fetchUserInteractions(user.uid);
+
           if (firestoreEntries.length > 0) {
-            setEntries(firestoreEntries);
+            const cleanEntries = deduplicateAndSanitizeEntries(firestoreEntries);
+            setEntries(cleanEntries);
             // Also cache locally for offline continuity
-            await saveEntries(firestoreEntries, activePasscode || undefined);
+            await saveEntries(cleanEntries, activePasscode || undefined);
+            if (!isInitialized) {
+              await markUserInitializedInFirestore(user.uid, user.email);
+            }
+          } else if (isInitialized) {
+            // User is already initialized in Firestore; 0 entries means they deleted them or have none
+            setEntries([]);
+            await saveEntries([], activePasscode || undefined);
           } else {
-            // Check local fallback if new account
+            // Brand new account: check local fallback or seed initial welcome entries once
             const local = await loadEntries(activePasscode || undefined);
-            if (local.length > 0) {
-              setEntries(local);
-              // Seed to Firestore under the new user ID
-              for (const entry of local) {
+            const cleanLocal = deduplicateAndSanitizeEntries(local);
+            if (cleanLocal.length > 0) {
+              setEntries(cleanLocal);
+              // Seed once to Firestore under the new user ID
+              for (const entry of cleanLocal) {
                 await saveInteractionToFirestore(user.uid, entry);
               }
             } else {
               setEntries([]);
             }
+            await markUserInitializedInFirestore(user.uid, user.email);
           }
 
           // Sync notification preferences to ensure server cache has latest settings
@@ -105,9 +124,10 @@ export default function App() {
           console.error('Failed to load user interactions from Firestore:', err);
           // Fallback to local storage
           const local = await loadEntries(activePasscode || undefined);
-          setEntries(local);
+          setEntries(deduplicateAndSanitizeEntries(local));
         } finally {
           setIsSyncing(false);
+          syncInProgressRef.current = false;
         }
       } else {
         // Logged out: Clear memory state for data isolation
@@ -115,6 +135,7 @@ export default function App() {
         setEntries([]);
         setSelectedEntry(null);
         setViewMode('list');
+        syncInProgressRef.current = false;
       }
     });
 
@@ -271,13 +292,10 @@ export default function App() {
   };
 
   // Delete entry
-  const handleDeleteEntry = async (id: string) => {
+  const handleDeleteEntry = async (id: string): Promise<void> => {
     if (currentUser) {
-      try {
-        await deleteInteractionFromFirestore(currentUser.uid, id);
-      } catch (err) {
-        console.error('Failed to delete interaction from Firestore:', err);
-      }
+      // Must await Firestore deletion; if it fails, error will bubble to caller so UI remains accurate
+      await deleteInteractionFromFirestore(currentUser.uid, id);
     }
 
     const updated = entries.filter((e) => e.id !== id);
@@ -363,7 +381,7 @@ export default function App() {
     entries.forEach((e) => {
       md += `## ${e.title}\n`;
       md += `**Date:** ${new Date(e.createdAt).toLocaleDateString()} | **Mood:** ${e.mood} | **Tags:** ${e.tags.map((t) => `#${t}`).join(' ')}\n\n`;
-      md += `${e.content}\n\n`;
+      md += `${htmlToMarkdown(e.content)}\n\n`;
       if (e.reflection) {
         md += `### Gemini Reflection (${e.reflection.mode})\n`;
         md += `${e.reflection.reflectionText}\n\n`;
@@ -487,16 +505,25 @@ export default function App() {
         streak={streak}
       />
 
-      {/* Sync indicator if loading cloud data */}
-      {isSyncing && (
-        <div className="bg-[#F2ECE1] border-b border-[#E0D8CB] px-4 py-1.5 text-center text-xs text-[#5D5548] flex items-center justify-center gap-1.5">
-          <RefreshCw className="w-3 h-3 animate-spin text-amber-700" />
+      {/* Sync indicator: smooth floating indicator with subtle progress bar, zero layout jump */}
+      <div
+        id="cloud-sync-status-indicator"
+        aria-live="polite"
+        className={`fixed top-18 sm:top-20 left-1/2 -translate-x-1/2 z-40 transition-all duration-300 pointer-events-none ${
+          isSyncing ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-2'
+        }`}
+      >
+        <div className="bg-[#24211D]/95 backdrop-blur-xs text-[#FAF8F5] border border-[#3D372F] px-3.5 py-1.5 rounded-full shadow-lg text-xs font-medium flex items-center gap-2.5">
+          <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-400 shrink-0" />
           <span>Synchronizing your private Firestore entries...</span>
+          <div className="w-10 h-1 bg-[#3D372F] rounded-full overflow-hidden shrink-0">
+            <div className="h-full bg-amber-400 rounded-full animate-pulse w-3/4" />
+          </div>
         </div>
-      )}
+      </div>
 
       {/* Main Content Area */}
-      <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-8 py-6 sm:py-8">
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-8 py-6 sm:py-8">
         {/* Admin Dashboard view */}
         {viewMode === 'admin' ? (
           <AdminDashboard
@@ -559,7 +586,7 @@ export default function App() {
 
       {/* Footer */}
       <footer className="border-t border-[#E8E3DA] py-6 px-4 text-center text-xs text-[#8A8376]">
-        <div className="max-w-6xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-3">
+        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-3">
           <span>
             Personal Gemini Journal • Owner-Bound Cloud Firestore & Gemini AI Reflections
           </span>

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   ArrowLeft,
   Sparkles,
@@ -24,10 +24,30 @@ import {
   MapPin,
   ExternalLink,
   X,
+  Info,
+  MessageSquare,
+  Send,
+  CornerDownLeft,
+  Trash2,
+  User as UserIcon,
 } from 'lucide-react';
-import type { JournalEntry, MoodType, AiReflection, EntryLocation } from '../types.ts';
+import type {
+  JournalEntry,
+  MoodType,
+  AiReflection,
+  EntryLocation,
+  ReflectionConversation,
+  ConversationMessage,
+} from '../types.ts';
 import { MOODS } from '../utils/storage.ts';
 import { redactPII } from '../utils/crypto.ts';
+import { stripHtml, countWords, markdownToHtml } from '../utils/richText.ts';
+import {
+  getDisplayPlaceName,
+  isRawCoordinateString,
+  resolveLocationAsync,
+} from '../utils/locationHelper.ts';
+import { sendReflectionChatMessage } from '../utils/apiClient.ts';
 
 interface EntryEditorProps {
   entry: JournalEntry | null;
@@ -38,13 +58,25 @@ interface EntryEditorProps {
 const POPULAR_TAGS = ['Mindfulness', 'Gratitude', 'Career', 'Relationships', 'Health', 'Creativity', 'Reframing', 'Family', 'Dreams'];
 
 export function EntryEditor({ entry, onSave, onBack }: EntryEditorProps) {
+  const editorRef = useRef<HTMLDivElement>(null);
+  const [activeEntryId, setActiveEntryId] = useState<string>(
+    () => entry?.id || `entry-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+  );
   const [title, setTitle] = useState(entry?.title || '');
-  const [content, setContent] = useState(entry?.content || '');
+  const [content, setContent] = useState(() => markdownToHtml(entry?.content || ''));
   const [mood, setMood] = useState<MoodType>(entry?.mood || 'thoughtful');
   const [tags, setTags] = useState<string[]>(entry?.tags || []);
   const [newTagInput, setNewTagInput] = useState('');
   const [isFavorite, setIsFavorite] = useState(entry?.isFavorite || false);
   const [reflection, setReflection] = useState<AiReflection | undefined>(entry?.reflection);
+
+  // Active toolbar formats (WYSIWYG state)
+  const [activeFormats, setActiveFormats] = useState({
+    bold: false,
+    italic: false,
+    list: false,
+    quote: false,
+  });
 
   // Geolocation state
   const [location, setLocation] = useState<EntryLocation | undefined>(entry?.location);
@@ -61,14 +93,49 @@ export function EntryEditor({ entry, onSave, onBack }: EntryEditorProps) {
   const [reflectionError, setReflectionError] = useState<string | null>(null);
   const [redactionNotice, setRedactionNotice] = useState<string | null>(null);
 
+  // Multi-Turn Reflection Dialogue state
+  const [conversation, setConversation] = useState<ReflectionConversation | undefined>(
+    entry?.conversation
+  );
+  const [chatInput, setChatInput] = useState('');
+  const [isChatSending, setIsChatSending] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
+  const chatBottomRef = useRef<HTMLDivElement>(null);
+
   // Persistence status states
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveSuccessNotice, setSaveSuccessNotice] = useState<string | null>(null);
 
+  // Initialize and sync editor DOM when entry changes or on mount
+  useEffect(() => {
+    if (entry?.id) {
+      setActiveEntryId(entry.id);
+      setTitle(entry.title || '');
+      setMood(entry.mood || 'thoughtful');
+      setTags(entry.tags || []);
+      setIsFavorite(entry.isFavorite || false);
+      setReflection(entry.reflection);
+      setConversation(entry.conversation);
+    }
+    const formatted = markdownToHtml(entry?.content || '');
+    setContent(formatted);
+    if (editorRef.current) {
+      editorRef.current.innerHTML = formatted;
+    }
+
+    // Auto-resolve any legacy coordinate strings to friendly place names
+    if (entry?.location && isRawCoordinateString(entry.location.name)) {
+      resolveLocationAsync(entry.location, (resolvedName) => {
+        setLocation((prev) => (prev ? { ...prev, name: resolvedName } : prev));
+      });
+    }
+  }, [entry?.id]);
+
   // Metrics
-  const words = content.trim() ? content.trim().split(/\s+/).length : 0;
+  const words = countWords(content);
   const readingTimeMin = Math.max(1, Math.ceil(words / 200));
+  const isContentEmpty = !content || !stripHtml(content).trim();
 
   // Handle Ctrl+S or Cmd+S
   useEffect(() => {
@@ -82,26 +149,96 @@ export function EntryEditor({ entry, onSave, onBack }: EntryEditorProps) {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [title, content, mood, tags, isFavorite, reflection, location]);
 
+  // Query browser formatting state for selection or current cursor
+  const updateActiveFormats = () => {
+    if (!editorRef.current) return;
+    try {
+      const isBold = document.queryCommandState('bold');
+      const isItalic = document.queryCommandState('italic');
+      const isList = document.queryCommandState('insertUnorderedList');
+      const blockType = document.queryCommandValue('formatBlock');
+      const isQuote = blockType === 'blockquote' || blockType?.toLowerCase() === 'blockquote';
+      setActiveFormats({
+        bold: isBold,
+        italic: isItalic,
+        list: isList,
+        quote: Boolean(isQuote),
+      });
+    } catch {
+      // Ignore if outside editable range
+    }
+  };
+
+  const handleEditorInput = () => {
+    if (!editorRef.current) return;
+    const html = editorRef.current.innerHTML;
+    const plain = editorRef.current.innerText || '';
+    if (!plain.trim() && (html === '<br>' || html === '<p><br></p>' || html === '<div><br></div>')) {
+      setContent('');
+    } else {
+      setContent(html);
+    }
+    updateActiveFormats();
+  };
+
+  // WYSIWYG format command execution
+  const handleFormat = (command: string, value: string | undefined = undefined) => {
+    if (!editorRef.current) return;
+    editorRef.current.focus();
+
+    if (command === 'formatBlock' && value === 'blockquote') {
+      const blockType = document.queryCommandValue('formatBlock');
+      const isQuote = blockType === 'blockquote' || blockType?.toLowerCase() === 'blockquote';
+      document.execCommand('formatBlock', false, isQuote ? '<p>' : '<blockquote>');
+    } else {
+      document.execCommand(command, false, value);
+    }
+
+    updateActiveFormats();
+    handleEditorInput();
+  };
+
   const handleSave = async (
     overrideReflection?: AiReflection,
-    options?: { keepOpen?: boolean; isNewReflection?: boolean }
+    options?: { keepOpen?: boolean; isNewReflection?: boolean },
+    overrideConversation?: ReflectionConversation | null
   ) => {
     setSaveError(null);
     setSaveSuccessNotice(null);
     setIsSaving(true);
 
+    const currentHtml = editorRef.current ? editorRef.current.innerHTML : content;
+    const cleanHtml = currentHtml === '<br>' || currentHtml === '<p><br></p>' ? '' : currentHtml;
+    const strippedText = stripHtml(cleanHtml).trim();
+    const cleanTitle = title.trim();
+
+    // Safeguard to prevent saving empty/placeholder entries without substantive reflection
+    if (strippedText.length < 4 && cleanTitle.length < 3 && !overrideReflection && !reflection) {
+      setSaveError('Please write at least a few words or a title before saving this reflection.');
+      setIsSaving(false);
+      return;
+    }
+
+    const resolvedConversation =
+      overrideConversation !== undefined
+        ? overrideConversation === null
+          ? undefined
+          : overrideConversation
+        : conversation;
+
     const now = new Date().toISOString();
     const finalEntry: JournalEntry = {
-      id: entry?.id || `entry-${Date.now()}`,
-      title: title.trim() || 'Untitled Reflection',
-      content,
+      id: activeEntryId,
+      title: cleanTitle || 'Untitled Reflection',
+      content: cleanHtml,
       createdAt: entry?.createdAt || now,
       updatedAt: now,
       mood,
       tags,
       isFavorite,
-      wordCount: words,
+      wordCount: countWords(cleanHtml),
       reflection: overrideReflection !== undefined ? overrideReflection : reflection,
+      conversation: resolvedConversation,
       location,
     };
 
@@ -115,6 +252,69 @@ export function EntryEditor({ entry, onSave, onBack }: EntryEditorProps) {
       setSaveError(err.message || 'Failed to save entry to Cloud Firestore. Your writing is preserved.');
     } finally {
       setIsSaving(false);
+    }
+  };
+
+  /**
+   * Send follow-up question or reflection prompt in multi-turn conversation
+   */
+  const handleSendChatMessage = async (presetQuestion?: string) => {
+    const rawMsg = presetQuestion || chatInput;
+    const msg = rawMsg.trim();
+    if (!msg || isChatSending) return;
+
+    const plainText = stripHtml(content).trim();
+    if (!plainText) {
+      setChatError('Please write some thoughts in your journal entry before discussing it with Gemini.');
+      return;
+    }
+
+    setChatError(null);
+    setIsChatSending(true);
+    if (!presetQuestion) {
+      setChatInput('');
+    }
+
+    try {
+      const result = await sendReflectionChatMessage({
+        entryId: activeEntryId,
+        entryTitle: title.trim() || 'Journal Entry',
+        entryText: plainText,
+        initialReflection: reflection?.reflectionText,
+        messages: conversation?.messages || [],
+        message: msg,
+        mode: reflectionMode,
+        conversationId: conversation?.id,
+        conversationCreatedAt: conversation?.createdAt,
+      });
+
+      setConversation(result.conversation);
+
+      // Save to sync Firestore state and parent state immediately
+      await handleSave(reflection, { keepOpen: true }, result.conversation);
+
+      setTimeout(() => {
+        chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }, 150);
+    } catch (err: any) {
+      console.error('Gemini chat error:', err);
+      setChatError(err.message || 'Failed to receive a response from Gemini. Please try again.');
+      if (!presetQuestion) {
+        setChatInput(rawMsg);
+      }
+    } finally {
+      setIsChatSending(false);
+    }
+  };
+
+  /**
+   * Clear the active dialogue history with user confirmation
+   */
+  const handleClearConversation = async () => {
+    if (!conversation || !conversation.messages?.length) return;
+    if (confirm('Clear this follow-up dialogue? Your journal entry and primary reflection will remain intact.')) {
+      setConversation(undefined);
+      await handleSave(reflection, { keepOpen: true }, null);
     }
   };
 
@@ -167,19 +367,18 @@ export function EntryEditor({ entry, onSave, onBack }: EntryEditorProps) {
           setLocationSuccessNotice(`Attached: ${newLoc.name || 'Current Location'}`);
           setTimeout(() => setLocationSuccessNotice(null), 4000);
         } catch {
-          // Network or API failure fallback: store validated coordinates gracefully
-          const fallbackName = `${Math.abs(latitude).toFixed(2)}° ${latitude >= 0 ? 'N' : 'S'}, ${Math.abs(longitude).toFixed(2)}° ${longitude >= 0 ? 'E' : 'W'}`;
+          // Network or API failure fallback: store validated coordinates gracefully with clean place label
           const newLoc: EntryLocation = {
             latitude,
             longitude,
-            name: fallbackName,
+            name: 'Captured Location',
             formattedAddress: `Coordinates: ${latitude.toFixed(4)}, ${longitude.toFixed(4)}`,
             accuracy: accuracy || undefined,
             capturedAt: new Date().toISOString(),
             source: 'coordinates-fallback',
           };
           setLocation(newLoc);
-          setLocationSuccessNotice('Coordinates attached.');
+          setLocationSuccessNotice('Location captured.');
           setTimeout(() => setLocationSuccessNotice(null), 4000);
         } finally {
           setIsLocating(false);
@@ -228,26 +427,9 @@ export function EntryEditor({ entry, onSave, onBack }: EntryEditorProps) {
     setTags(tags.filter((t) => t !== tagToRemove));
   };
 
-  const insertMarkdown = (prefix: string, suffix: string = '') => {
-    const textarea = document.getElementById('entry-content-textarea') as HTMLTextAreaElement;
-    if (!textarea) return;
-
-    const start = textarea.selectionStart;
-    const end = textarea.selectionEnd;
-    const selected = content.substring(start, end);
-    const replacement = `${prefix}${selected || 'text'}${suffix}`;
-
-    const newContent = content.substring(0, start) + replacement + content.substring(end);
-    setContent(newContent);
-
-    setTimeout(() => {
-      textarea.focus();
-      textarea.setSelectionRange(start + prefix.length, start + prefix.length + (selected.length || 4));
-    }, 0);
-  };
-
   const handleReflectWithGemini = async () => {
-    if (!content.trim()) {
+    const plainText = stripHtml(content);
+    if (!plainText.trim()) {
       setReflectionError('Please write some journal content before requesting an AI reflection.');
       return;
     }
@@ -256,9 +438,9 @@ export function EntryEditor({ entry, onSave, onBack }: EntryEditorProps) {
     setReflectionError(null);
     setRedactionNotice(null);
 
-    let textToSend = content;
+    let textToSend = plainText;
     if (enablePiiRedaction) {
-      const { redactedText, redactionsCount } = redactPII(content);
+      const { redactedText, redactionsCount } = redactPII(plainText);
       textToSend = redactedText;
       if (redactionsCount > 0) {
         setRedactionNotice(`Masked ${redactionsCount} personal identifier(s) (emails/numbers) for privacy.`);
@@ -304,8 +486,18 @@ export function EntryEditor({ entry, onSave, onBack }: EntryEditorProps) {
   };
 
   const appendQuestionToEntry = (question: string) => {
-    const addition = `\n\n> **Reflecting on:** *${question}*\n\n`;
-    setContent((prev) => prev + addition);
+    const safeQuestion = question
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    const addition = `<blockquote><strong>Reflecting on:</strong> <em>${safeQuestion}</em></blockquote><p><br></p>`;
+    if (editorRef.current) {
+      editorRef.current.focus();
+      editorRef.current.innerHTML = (editorRef.current.innerHTML || '') + addition;
+      handleEditorInput();
+    } else {
+      setContent((prev) => prev + addition);
+    }
   };
 
   const currentMoodMeta = MOODS.find((m) => m.type === mood) || MOODS[0];
@@ -456,13 +648,20 @@ export function EntryEditor({ entry, onSave, onBack }: EntryEditorProps) {
             {location ? (
               <div className="flex flex-wrap items-center gap-1.5 text-[#2E2A24]">
                 <span className="font-medium text-[#1F1C18]">
-                  {location.name || `${location.latitude.toFixed(4)}, ${location.longitude.toFixed(4)}`}
+                  {getDisplayPlaceName(location)}
                 </span>
-                {location.formattedAddress && location.formattedAddress !== location.name && (
+                {location.formattedAddress && !isRawCoordinateString(location.formattedAddress) && location.formattedAddress !== getDisplayPlaceName(location) && (
                   <span className="text-[11px] text-[#787163] hidden sm:inline">
                     ({location.formattedAddress})
                   </span>
                 )}
+                {/* Coordinates as small metadata info tooltip */}
+                <span
+                  className="inline-flex items-center text-[#8C8476] hover:text-[#5E574B] cursor-help ml-0.5"
+                  title={`Coordinates: ${location.latitude.toFixed(4)}, ${location.longitude.toFixed(4)}${typeof location.accuracy === 'number' ? ` (±${Math.round(location.accuracy)}m)` : ''}`}
+                >
+                  <Info className="w-3.5 h-3.5" />
+                </span>
                 {typeof location.accuracy === 'number' && (
                   <span className="text-[10px] text-[#8C8476] bg-[#F4EFE6] px-1.5 py-0.5 rounded">
                     ±{Math.round(location.accuracy)}m
@@ -566,37 +765,69 @@ export function EntryEditor({ entry, onSave, onBack }: EntryEditorProps) {
           </div>
         )}
 
-        {/* Markdown Toolbar */}
+        {/* Rich Text Toolbar */}
         <div className="flex flex-wrap items-center justify-between gap-2 p-1.5 bg-[#F4EFE6] border border-[#E2DCCE] rounded-lg text-xs text-[#5E574B]">
           <div className="flex items-center gap-1">
             <button
+              id="editor-format-bold"
               type="button"
-              onClick={() => insertMarkdown('**', '**')}
-              className="p-1.5 hover:bg-white rounded hover:text-[#1F1C18]"
-              title="Bold (**text**)"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                handleFormat('bold');
+              }}
+              className={`p-1.5 rounded transition-all flex items-center justify-center ${
+                activeFormats.bold
+                  ? 'bg-[#24211D] text-[#FAF8F5] shadow-2xs font-bold'
+                  : 'hover:bg-white text-[#5E574B] hover:text-[#1F1C18]'
+              }`}
+              title="Bold (Ctrl+B / ⌘B)"
             >
               <Bold className="w-3.5 h-3.5" />
             </button>
             <button
+              id="editor-format-italic"
               type="button"
-              onClick={() => insertMarkdown('*', '*')}
-              className="p-1.5 hover:bg-white rounded hover:text-[#1F1C18]"
-              title="Italic (*text*)"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                handleFormat('italic');
+              }}
+              className={`p-1.5 rounded transition-all flex items-center justify-center ${
+                activeFormats.italic
+                  ? 'bg-[#24211D] text-[#FAF8F5] shadow-2xs italic'
+                  : 'hover:bg-white text-[#5E574B] hover:text-[#1F1C18]'
+              }`}
+              title="Italic (Ctrl+I / ⌘I)"
             >
               <Italic className="w-3.5 h-3.5" />
             </button>
             <button
+              id="editor-format-list"
               type="button"
-              onClick={() => insertMarkdown('\n- ')}
-              className="p-1.5 hover:bg-white rounded hover:text-[#1F1C18]"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                handleFormat('insertUnorderedList');
+              }}
+              className={`p-1.5 rounded transition-all flex items-center justify-center ${
+                activeFormats.list
+                  ? 'bg-[#24211D] text-[#FAF8F5] shadow-2xs'
+                  : 'hover:bg-white text-[#5E574B] hover:text-[#1F1C18]'
+              }`}
               title="Bullet list"
             >
               <List className="w-3.5 h-3.5" />
             </button>
             <button
+              id="editor-format-quote"
               type="button"
-              onClick={() => insertMarkdown('\n> ')}
-              className="p-1.5 hover:bg-white rounded hover:text-[#1F1C18]"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                handleFormat('formatBlock', 'blockquote');
+              }}
+              className={`p-1.5 rounded transition-all flex items-center justify-center ${
+                activeFormats.quote
+                  ? 'bg-[#24211D] text-[#FAF8F5] shadow-2xs'
+                  : 'hover:bg-white text-[#5E574B] hover:text-[#1F1C18]'
+              }`}
               title="Blockquote"
             >
               <Quote className="w-3.5 h-3.5" />
@@ -608,15 +839,44 @@ export function EntryEditor({ entry, onSave, onBack }: EntryEditorProps) {
           </span>
         </div>
 
-        {/* Content Textarea */}
-        <div>
+        {/* Content Rich Text Editor */}
+        <div className="relative">
+          <div
+            id="entry-content-editor"
+            ref={editorRef}
+            contentEditable
+            role="textbox"
+            aria-multiline="true"
+            onInput={handleEditorInput}
+            onKeyUp={updateActiveFormats}
+            onMouseUp={updateActiveFormats}
+            onSelect={updateActiveFormats}
+            onBlur={() => {
+              handleEditorInput();
+              updateActiveFormats();
+            }}
+            className="w-full min-h-[360px] font-editorial text-[17px] leading-[1.7] text-[#24211D] bg-white border border-[#E0D9CC] rounded-xl p-5 sm:p-6 focus:outline-hidden focus:border-[#24211D] focus:ring-1 focus:ring-[#24211D] shadow-2xs overflow-y-auto cursor-text [&_blockquote]:border-l-4 [&_blockquote]:border-amber-700/60 [&_blockquote]:pl-4 [&_blockquote]:py-1.5 [&_blockquote]:my-3 [&_blockquote]:italic [&_blockquote]:text-[#4A4339] [&_blockquote]:bg-[#F9F6F0] [&_blockquote]:rounded-r-lg [&_ul]:list-disc [&_ul]:pl-6 [&_ul]:my-2.5 [&_ol]:list-decimal [&_ol]:pl-6 [&_ol]:my-2.5 [&_li]:my-0.5 [&_b]:font-bold [&_strong]:font-bold [&_i]:italic [&_em]:italic [&_p]:my-1.5"
+          />
+
+          {isContentEmpty && (
+            <div
+              id="editor-placeholder"
+              onClick={() => editorRef.current?.focus()}
+              className="absolute top-5 sm:top-6 left-5 sm:left-6 font-editorial text-[17px] leading-[1.7] text-[#A39C91] pointer-events-none select-none"
+            >
+              Write without judgment. Whatever needs to be felt or witnessed has a home here...
+            </div>
+          )}
+
+          {/* Hidden textarea for DOM compatibility */}
           <textarea
             id="entry-content-textarea"
-            rows={14}
             value={content}
-            onChange={(e) => setContent(e.target.value)}
-            placeholder="Write without judgment. Whatever needs to be felt or witnessed has a home here..."
-            className="w-full font-editorial text-[17px] leading-[1.7] text-[#24211D] placeholder-[#A39C91] bg-white border border-[#E0D9CC] rounded-xl p-5 sm:p-6 focus:outline-hidden focus:border-[#24211D] focus:ring-1 focus:ring-[#24211D] shadow-2xs resize-y"
+            onChange={() => {}}
+            className="hidden"
+            aria-hidden="true"
+            tabIndex={-1}
+            readOnly
           />
         </div>
 
@@ -792,21 +1052,34 @@ export function EntryEditor({ entry, onSave, onBack }: EntryEditorProps) {
                     {reflection.followUpQuestions.map((q, idx) => (
                       <div
                         key={idx}
-                        className="flex items-start justify-between gap-3 p-2.5 bg-[#FAF8F5] rounded-lg border border-[#E8E3DA] text-xs"
+                        className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-3 bg-[#FAF8F5] rounded-lg border border-[#E8E3DA] text-xs"
                       >
-                        <p className="text-[#332E27] font-editorial text-[14px]">
+                        <p className="text-[#332E27] font-editorial text-[14px] flex-1">
                           "{q}"
                         </p>
-                        <button
-                          id={`answer-prompt-btn-${idx}`}
-                          type="button"
-                          onClick={() => appendQuestionToEntry(q)}
-                          className="shrink-0 flex items-center gap-1 text-[11px] font-medium text-[#24211D] hover:underline"
-                          title="Append to journal entry"
-                        >
-                          <PlusCircle className="w-3.5 h-3.5 text-emerald-700" />
-                          <span>Answer below</span>
-                        </button>
+                        <div className="flex items-center gap-1.5 shrink-0 self-end sm:self-auto">
+                          <button
+                            id={`answer-prompt-btn-${idx}`}
+                            type="button"
+                            onClick={() => appendQuestionToEntry(q)}
+                            className="flex items-center gap-1 text-[11px] font-medium text-[#24211D] hover:underline px-2 py-1 rounded bg-white border border-[#E0D8CA]"
+                            title="Append to journal entry"
+                          >
+                            <PlusCircle className="w-3.5 h-3.5 text-emerald-700" />
+                            <span>Answer below</span>
+                          </button>
+                          <button
+                            id={`discuss-gemini-prompt-btn-${idx}`}
+                            type="button"
+                            onClick={() => handleSendChatMessage(q)}
+                            disabled={isChatSending}
+                            className="flex items-center gap-1 text-[11px] font-medium text-[#FAF8F5] bg-[#24211D] hover:bg-[#3D372F] px-2.5 py-1 rounded transition-colors disabled:opacity-50"
+                            title="Discuss this inquiry in multi-turn conversation with Gemini"
+                          >
+                            <MessageSquare className="w-3 h-3 text-amber-300" />
+                            <span>Discuss with Gemini</span>
+                          </button>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -829,6 +1102,171 @@ export function EntryEditor({ entry, onSave, onBack }: EntryEditorProps) {
               )}
             </div>
           )}
+
+          {/* MULTI-TURN REFLECTION DIALOGUE */}
+          <div
+            id="multi-turn-dialogue-section"
+            className="mt-6 pt-5 border-t border-[#E2DCCE] space-y-4"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-7 h-7 rounded-lg bg-[#24211D] text-[#FAF8F5] flex items-center justify-center shadow-2xs">
+                  <MessageSquare className="w-3.5 h-3.5 text-amber-300" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h4 className="text-xs font-semibold uppercase tracking-wider text-[#3D372F]">
+                      Multi-Turn Reflection Dialogue
+                    </h4>
+                    {conversation?.messages && conversation.messages.length > 0 && (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-[#E8E2D5] text-[#554D41]">
+                        {conversation.messages.length} message{conversation.messages.length === 1 ? '' : 's'}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-[#7A7367]">
+                    Continue the conversation with your reflective companion — ask clarifying questions or explore feelings deeper.
+                  </p>
+                </div>
+              </div>
+
+              {conversation?.messages && conversation.messages.length > 0 && (
+                <button
+                  id="clear-dialogue-btn"
+                  type="button"
+                  onClick={handleClearConversation}
+                  className="flex items-center gap-1 text-[11px] text-[#888073] hover:text-red-700 transition-colors"
+                  title="Clear conversation history"
+                >
+                  <Trash2 className="w-3 h-3" />
+                  <span>Reset dialogue</span>
+                </button>
+              )}
+            </div>
+
+            {/* Conversation Messages Thread */}
+            {conversation?.messages && conversation.messages.length > 0 ? (
+              <div
+                id="dialogue-messages-thread"
+                className="space-y-3 p-4 bg-white/80 rounded-xl border border-[#E5E0D5] max-h-[420px] overflow-y-auto shadow-2xs"
+              >
+                {conversation.messages.map((msg, i) => (
+                  <div
+                    key={msg.id || i}
+                    className={`flex items-start gap-2.5 ${
+                      msg.role === 'user' ? 'justify-end' : 'justify-start'
+                    }`}
+                  >
+                    {msg.role === 'model' && (
+                      <div className="w-6 h-6 rounded-md bg-[#24211D] text-amber-400 flex items-center justify-center shrink-0 mt-1 shadow-2xs">
+                        <Sparkles className="w-3 h-3" />
+                      </div>
+                    )}
+                    <div
+                      className={`max-w-[85%] rounded-xl p-3.5 text-xs shadow-2xs ${
+                        msg.role === 'user'
+                          ? 'bg-[#24211D] text-[#FAF8F5]'
+                          : 'bg-[#F9F7F2] text-[#24211D] border border-[#E5E0D5]'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-3 mb-1 text-[10px] opacity-75">
+                        <span className="font-medium">
+                          {msg.role === 'user' ? 'You' : 'Gemini Companion'}
+                        </span>
+                        <span>
+                          {msg.timestamp
+                            ? new Date(msg.timestamp).toLocaleTimeString([], {
+                                hour: '2-digit',
+                                minute: '2-digit',
+                              })
+                            : ''}
+                        </span>
+                      </div>
+                      <div className="font-editorial text-[14px] leading-relaxed whitespace-pre-line">
+                        {msg.content}
+                      </div>
+                    </div>
+                    {msg.role === 'user' && (
+                      <div className="w-6 h-6 rounded-md bg-[#E8E2D5] text-[#4A4339] flex items-center justify-center shrink-0 mt-1">
+                        <UserIcon className="w-3 h-3" />
+                      </div>
+                    )}
+                  </div>
+                ))}
+                <div ref={chatBottomRef} />
+              </div>
+            ) : (
+              <div className="p-4 rounded-xl bg-white/60 border border-dashed border-[#DBD4C5] text-center space-y-2">
+                <p className="text-xs text-[#6A6356]">
+                  No follow-up exchanges yet. Ask Gemini a question about this entry or select a prompt below.
+                </p>
+                {/* Starter suggestions */}
+                <div className="flex flex-wrap items-center justify-center gap-1.5 pt-1">
+                  {[
+                    'How can I view this situation with more self-compassion?',
+                    'What unspoken emotions might be beneath the surface here?',
+                    'Help me reframe this thought constructively.',
+                    'What is one small step I can take next?',
+                  ].map((starter, sIdx) => (
+                    <button
+                      key={sIdx}
+                      type="button"
+                      onClick={() => handleSendChatMessage(starter)}
+                      disabled={isChatSending || !content.trim()}
+                      className="px-2.5 py-1 rounded-full text-[11px] bg-white border border-[#DDD6C8] hover:border-[#24211D] text-[#4A4339] hover:text-[#1F1C18] transition-colors disabled:opacity-40"
+                    >
+                      "{starter}"
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Chat Error Banner */}
+            {chatError && (
+              <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-800 text-xs flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+                <span>{chatError}</span>
+              </div>
+            )}
+
+            {/* Chat Input Box */}
+            <div className="relative flex items-center gap-2">
+              <input
+                id="dialogue-chat-input"
+                type="text"
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSendChatMessage();
+                  }
+                }}
+                disabled={isChatSending}
+                placeholder={
+                  isChatSending
+                    ? 'Gemini is reflecting with you...'
+                    : 'Ask Gemini a follow-up question or share a reflection... (Enter to send)'
+                }
+                className="flex-1 text-xs px-3.5 py-2.5 bg-white border border-[#D5CEC0] rounded-xl text-[#24211D] placeholder-[#9E978C] focus:outline-hidden focus:border-[#24211D] focus:ring-1 focus:ring-[#24211D] disabled:opacity-60 shadow-2xs"
+              />
+              <button
+                id="dialogue-send-btn"
+                type="button"
+                onClick={() => handleSendChatMessage()}
+                disabled={isChatSending || !chatInput.trim()}
+                className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-medium bg-[#24211D] hover:bg-[#3D372F] text-[#FAF8F5] transition-colors shadow-2xs disabled:opacity-40"
+              >
+                {isChatSending ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-300" />
+                ) : (
+                  <Send className="w-3.5 h-3.5 text-amber-300" />
+                )}
+                <span className="hidden sm:inline">{isChatSending ? 'Reflecting...' : 'Send'}</span>
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </div>

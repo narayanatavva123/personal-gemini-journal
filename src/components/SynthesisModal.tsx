@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Sparkles, X, RefreshCw, Compass, Heart, Award, ArrowUpRight, Copy, Check } from 'lucide-react';
 import type { JournalEntry } from '../types.ts';
+import { stripHtml } from '../utils/richText.ts';
 
 interface SynthesisModalProps {
   isOpen: boolean;
@@ -34,7 +35,7 @@ export function SynthesisModal({ isOpen, onClose, entries }: SynthesisModalProps
           entries: entries.slice(0, 10).map((e) => ({
             date: e.createdAt.split('T')[0],
             title: e.title,
-            text: e.content,
+            text: stripHtml(e.content),
             mood: e.mood,
           })),
         }),

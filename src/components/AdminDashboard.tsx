@@ -112,7 +112,27 @@ export function AdminDashboard({ userProfile, onBackToJournal }: AdminDashboardP
   }
 
   return (
-    <div id="admin-dashboard-container" className="space-y-8 animate-fade-in">
+    <div id="admin-dashboard-container" className="space-y-6 sm:space-y-8 animate-fade-in">
+      {/* Elevated Administrative Environment Banner */}
+      <div
+        id="admin-environment-banner"
+        className="flex flex-wrap items-center justify-between gap-3 px-4 py-2.5 rounded-xl bg-[#1F1C18] text-[#FAF8F5] border border-[#3D372F] shadow-xs text-xs font-medium"
+      >
+        <div className="flex items-center gap-2">
+          <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+          <span className="font-semibold tracking-wide uppercase text-[11px] text-amber-400">
+            Elevated Admin Mode
+          </span>
+          <span className="text-[#8C8477] hidden sm:inline">•</span>
+          <span className="text-[#D8D2C5] hidden sm:inline">
+            System Telemetry & Access Control
+          </span>
+        </div>
+        <div className="flex items-center gap-2 text-[#A8A194] text-[11px]">
+          <span>Verified Account: {userProfile?.email || 'Authorized Administrator'}</span>
+        </div>
+      </div>
+
       {/* Dashboard Top Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-[#E2DCCE]">
         <div className="space-y-1">

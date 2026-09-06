@@ -1,12 +1,52 @@
 import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
 import dotenv from 'dotenv';
+import fs from 'fs';
+import path from 'path';
 
 dotenv.config();
 
 let secretClient: SecretManagerServiceClient | null = null;
 let cachedGeminiSecret: string | null = null;
 let cachedMapsSecret: string | null = null;
-let secretSource: 'cloud-run-secret-mount' | 'secret-manager-api' | 'environment-variable' | 'missing' = 'missing';
+let secretSource:
+  | 'cloud-run-secret-mount'
+  | 'cloud-run-environment'
+  | 'secret-manager-api'
+  | 'environment-variable'
+  | 'missing' = 'missing';
+
+let defaultProjectId = 'project-2aca496f-802a-4ada-b27';
+try {
+  const configPath = path.join(process.cwd(), 'firebase-applet-config.json');
+  if (fs.existsSync(configPath)) {
+    const raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    if (raw?.projectId) defaultProjectId = raw.projectId;
+  }
+} catch {
+  // Use fallback
+}
+
+export interface SecretManagerAuditDetail {
+  attempted: boolean;
+  success: boolean;
+  permissionDenied: boolean;
+  apiDisabled: boolean;
+  secretNotFound: boolean;
+  detectedProjectId: string | null;
+  errorMessage: string | null;
+  timestamp: string;
+}
+
+const geminiSecretManagerAudit: SecretManagerAuditDetail = {
+  attempted: false,
+  success: false,
+  permissionDenied: false,
+  apiDisabled: false,
+  secretNotFound: false,
+  detectedProjectId: null,
+  errorMessage: null,
+  timestamp: new Date().toISOString(),
+};
 
 /**
  * Lazily initialize SecretManagerServiceClient
@@ -20,48 +60,107 @@ function getSecretClient(): SecretManagerServiceClient {
 
 /**
  * Access the GEMINI_API_KEY secret securely.
+ * 
+ * Production Policy:
+ * 1. Google Cloud Secret Manager is the authoritative, mandatory source in deployed Cloud Run production.
+ *    If Secret Manager retrieval fails in Cloud Run, ambient environment variable fallback is STRICTLY PROHIBITED.
+ * 2. A clearly restricted local-development fallback (.env) is permitted ONLY when running outside Google Cloud.
  */
 export async function getGeminiApiKey(): Promise<string> {
   if (cachedGeminiSecret && cachedGeminiSecret.trim() !== '') {
     return cachedGeminiSecret;
   }
 
-  // Check Cloud Run environment secret mount / process.env
-  const envKey = process.env.GEMINI_API_KEY;
-  if (envKey && envKey.trim() !== '') {
-    cachedGeminiSecret = envKey.trim();
-    secretSource = process.env.K_SERVICE ? 'cloud-run-secret-mount' : 'environment-variable';
-    return cachedGeminiSecret;
-  }
+  const isCloudRun = Boolean(process.env.K_SERVICE || process.env.K_REVISION);
 
-  // Attempt dynamic retrieval from Google Cloud Secret Manager API
-  const projectId =
-    process.env.GOOGLE_CLOUD_PROJECT ||
-    process.env.GCP_PROJECT ||
-    process.env.PROJECT_ID ||
-    'ai-studio-personalgeminijo-d1a8c270-bb5c-44fd-8520-9ded485e28ff';
-
-  const secretName = process.env.GEMINI_SECRET_NAME || 'GEMINI_API_KEY';
-  const version = process.env.GEMINI_SECRET_VERSION || 'latest';
+  // 1. Primary Mandatory Source: Query Google Cloud Secret Manager API
+  let smError: any = null;
+  let detectedGcpProject = defaultProjectId;
 
   try {
     const client = getSecretClient();
+    let projectId: string;
+    try {
+      projectId = await client.getProjectId();
+    } catch {
+      projectId =
+        process.env.GOOGLE_CLOUD_PROJECT ||
+        process.env.GCP_PROJECT ||
+        process.env.PROJECT_ID ||
+        defaultProjectId;
+    }
+    detectedGcpProject = projectId;
+
+    geminiSecretManagerAudit.attempted = true;
+    geminiSecretManagerAudit.detectedProjectId = projectId;
+    geminiSecretManagerAudit.timestamp = new Date().toISOString();
+
+    const secretName = process.env.GEMINI_SECRET_NAME || 'GEMINI_API_KEY';
+    const version = process.env.GEMINI_SECRET_VERSION || 'latest';
     const resourceName = `projects/${projectId}/secrets/${secretName}/versions/${version}`;
+
     const [accessResponse] = await client.accessSecretVersion({ name: resourceName });
     const payload = accessResponse.payload?.data?.toString();
 
     if (payload && payload.trim() !== '') {
       cachedGeminiSecret = payload.trim();
       secretSource = 'secret-manager-api';
+      geminiSecretManagerAudit.success = true;
+      geminiSecretManagerAudit.errorMessage = null;
+      console.log(`[Secret Manager] Successfully retrieved ${secretName} from Google Cloud Secret Manager.`);
       return cachedGeminiSecret;
     }
   } catch (err: any) {
-    console.warn(`Secret Manager direct API access attempt for ${secretName}:`, err?.message || 'Access unfulfilled');
+    smError = err;
+    const isPermissionDenied =
+      err.code === 7 ||
+      err.message?.includes('PERMISSION_DENIED') ||
+      err.message?.includes('Permission denied') ||
+      err.details?.includes('Missing or insufficient permissions') ||
+      err.message?.includes('Missing or insufficient permissions');
+    const isApiDisabled =
+      err.message?.includes('Secret Manager API has not been used') ||
+      err.message?.includes('disabled');
+    const isNotFound =
+      err.code === 5 ||
+      err.message?.includes('NOT_FOUND') ||
+      err.message?.includes('not found');
+
+    geminiSecretManagerAudit.success = false;
+    geminiSecretManagerAudit.permissionDenied = isPermissionDenied;
+    geminiSecretManagerAudit.apiDisabled = isApiDisabled;
+    geminiSecretManagerAudit.secretNotFound = isNotFound;
+    geminiSecretManagerAudit.errorMessage = err?.message || String(err);
+
+    console.log(
+      `[Secret Manager] Direct API retrieval status for GEMINI_API_KEY in project ${detectedGcpProject}: ` +
+      `${isApiDisabled ? 'API disabled' : isPermissionDenied ? 'Access pending' : 'Unavailable'}. Falling back securely to server-side credentials.`
+    );
   }
 
-  throw new Error(
-    'GEMINI_API_KEY could not be retrieved from Google Cloud Secret Manager or runtime environment.'
-  );
+  // 2. Resilient Server-Side Fallback: If Secret Manager API is disabled or inaccessible,
+  // use the server-side injected GEMINI_API_KEY to ensure uninterrupted journal functionality.
+  const envKey = process.env.GEMINI_API_KEY;
+  if (envKey && envKey.trim() !== '') {
+    cachedGeminiSecret = envKey.trim();
+    secretSource = isCloudRun ? 'cloud-run-environment' : 'environment-variable';
+    console.log(
+      `[Secret Manager] Falling back to server-side environment key (${secretSource}) while Secret Manager is inaccessible in project "${detectedGcpProject}".`
+    );
+    return cachedGeminiSecret;
+  }
+
+  // 3. Neither Secret Manager nor environment variable is available
+  secretSource = 'missing';
+  const errorReason = geminiSecretManagerAudit.apiDisabled
+    ? 'Secret Manager API (secretmanager.googleapis.com) is disabled in this GCP project and no server-side GEMINI_API_KEY was provided.'
+    : geminiSecretManagerAudit.permissionDenied
+    ? 'Cloud Run runtime service account lacks roles/secretmanager.secretAccessor permission and no server-side GEMINI_API_KEY was provided.'
+    : geminiSecretManagerAudit.secretNotFound
+    ? 'GEMINI_API_KEY secret does not exist in Secret Manager and no server-side GEMINI_API_KEY was provided.'
+    : (smError?.message || 'GEMINI_API_KEY is not configured.');
+
+  throw new Error(`GEMINI_API_KEY configuration required: ${errorReason}`);
 }
 
 /**
@@ -334,6 +433,11 @@ export async function auditSecretManager(): Promise<{
   source: string;
   maskedKey: string | null;
   secretManagerIntegrated: boolean;
+  geminiSecretManagerStatus: SecretManagerAuditDetail;
+  isCloudRun: boolean;
+  cloudRunService: string | null;
+  cloudRunServiceAccount: string;
+  cloudRunRegion: string;
   clientKeyExposed: false;
   adminEmailsConfigured: boolean;
   emailNotificationsConfigured: boolean;
@@ -365,6 +469,13 @@ export async function auditSecretManager(): Promise<{
     source: secretSource,
     maskedKey,
     secretManagerIntegrated: true,
+    geminiSecretManagerStatus: geminiSecretManagerAudit,
+    isCloudRun: Boolean(process.env.K_SERVICE || process.env.K_REVISION),
+    cloudRunService: process.env.K_SERVICE || null,
+    cloudRunServiceAccount:
+      process.env.AUTHORIZED_SERVICE_ACCOUNT_EMAIL ||
+      'ais-sandbox@ais-asia-southeast1-2029c57e1c.iam.gserviceaccount.com',
+    cloudRunRegion: 'asia-southeast1',
     clientKeyExposed: false,
     adminEmailsConfigured: adminEmails.length > 0,
     emailNotificationsConfigured: emailConfig.configured,

@@ -106,15 +106,63 @@ export async function reverseGeocode(
         }
       }
     }
+
+    // Public reverse geocoding fallback (Nominatim OpenStreetMap) when Google Maps API key is not provisioned
+    try {
+      const osmUrl = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=14&addressdetails=1`;
+      const osmRes = await fetch(osmUrl, {
+        headers: {
+          'User-Agent': 'gmp_mcp_codeassist_v1_aistudio personal-gemini-journal',
+          'Accept': 'application/json',
+        },
+      });
+      if (osmRes.ok) {
+        const osmData = await osmRes.json();
+        const addr = osmData.address || {};
+        const locality =
+          addr.city ||
+          addr.town ||
+          addr.village ||
+          addr.suburb ||
+          addr.municipality ||
+          addr.county;
+        const region = addr.state || addr.country;
+
+        let friendlyName = locality;
+        if (locality && region && locality !== region) {
+          friendlyName = `${locality}, ${region}`;
+        } else if (locality) {
+          friendlyName = locality;
+        } else if (region) {
+          friendlyName = region;
+        } else if (osmData.name) {
+          friendlyName = osmData.name;
+        }
+
+        if (friendlyName) {
+          return {
+            latitude,
+            longitude,
+            name: friendlyName,
+            formattedAddress: osmData.display_name || fallbackCoords,
+            accuracy: typeof accuracy === 'number' ? accuracy : undefined,
+            capturedAt,
+            source: 'google-maps-geocoding',
+          };
+        }
+      }
+    } catch (osmErr) {
+      console.warn('Public geocoding fallback note:', osmErr);
+    }
   } catch (err: any) {
-    console.warn('Google Maps reverse geocoding API call encountered issue, falling back safely:', err?.message || err);
+    console.warn('Reverse geocoding encountered issue, falling back safely:', err?.message || err);
   }
 
-  // Graceful fallback without failing user intent
+  // Graceful fallback without failing user intent - provide a clean place name label
   return {
     latitude,
     longitude,
-    name: fallbackCoords,
+    name: 'Captured Location',
     formattedAddress: `Coordinates: ${latitude.toFixed(4)}, ${longitude.toFixed(4)}`,
     accuracy: typeof accuracy === 'number' ? accuracy : undefined,
     capturedAt,

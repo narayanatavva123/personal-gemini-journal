@@ -3,6 +3,8 @@ import type {
   AdminAggregateStats,
   UserNotificationSettings,
   UserAuthProfile,
+  ConversationMessage,
+  ReflectionConversation,
 } from '../types.ts';
 
 /**
@@ -173,3 +175,38 @@ export async function triggerNotificationEvent(
     return { dispatched: false, reason: err?.message || 'Network error' };
   }
 }
+
+/**
+ * Send a multi-turn follow-up question or reflection prompt to Gemini
+ */
+export async function sendReflectionChatMessage(params: {
+  entryId: string;
+  entryTitle?: string;
+  entryText: string;
+  initialReflection?: string;
+  messages?: ConversationMessage[];
+  history?: Array<{ role: 'user' | 'model'; content: string }>;
+  message: string;
+  mode?: string;
+  conversationId?: string;
+  conversationCreatedAt?: string;
+}): Promise<{
+  reply: string;
+  timestamp: string;
+  conversation: ReflectionConversation;
+}> {
+  const headers = await getAuthHeader();
+  const res = await fetch('/api/gemini/chat', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(params),
+  });
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.error || `Server responded with ${res.status}`);
+  }
+
+  return data;
+}
+

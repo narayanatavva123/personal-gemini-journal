@@ -204,3 +204,81 @@ export function calculateStreak(entries: JournalEntry[]): number {
 
   return streak;
 }
+
+/**
+ * Identify test or placeholder entries (e.g., 'Aweome', 'narayana', 'Title'/'hiii')
+ */
+export function isTestOrPlaceholderEntry(entry: JournalEntry): boolean {
+  if (!entry) return true;
+  const title = (entry.title || '').trim().toLowerCase();
+  const rawContent = (entry.content || '')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&nbsp;/g, ' ')
+    .trim()
+    .toLowerCase();
+
+  const testPhrases = ['aweome', 'narayana', 'hiii', 'test', 'asdf', 'dummy', 'testing'];
+
+  if (testPhrases.includes(title)) return true;
+  if (testPhrases.includes(rawContent)) return true;
+
+  // Combination of placeholder 'Title' and near-empty content like 'hiii'
+  if (title === 'title' && (rawContent.length < 5 || testPhrases.includes(rawContent))) {
+    return true;
+  }
+
+  // Fragment entries with no title, no reflection, and virtually zero characters
+  if (!entry.reflection && rawContent.length < 4 && title.length < 4) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Deduplicate entries by ID and by content fingerprint (e.g. preventing duplicate 'Happy mood' writes)
+ * and filter out invalid/placeholder test data for clean production viewing.
+ */
+export function deduplicateAndSanitizeEntries(entries: JournalEntry[]): JournalEntry[] {
+  if (!Array.isArray(entries)) return [];
+
+  const seenIds = new Set<string>();
+  const seenFingerprints = new Set<string>();
+  const cleanList: JournalEntry[] = [];
+
+  for (const entry of entries) {
+    if (!entry || !entry.id) continue;
+
+    // Filter out test/junk entries like 'Aweome', 'narayana', 'Title'/'hiii'
+    if (isTestOrPlaceholderEntry(entry)) {
+      continue;
+    }
+
+    // Deduplicate by entry ID
+    if (seenIds.has(entry.id)) {
+      continue;
+    }
+
+    // Deduplicate identical title + body content fingerprints (resolves duplicate writes on auth sync)
+    const normalizedTitle = (entry.title || '').trim().toLowerCase();
+    const cleanBody = (entry.content || '')
+      .replace(/<[^>]*>/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+    const fingerprint = `${normalizedTitle}::${cleanBody}`;
+
+    if (fingerprint.length > 5 && seenFingerprints.has(fingerprint)) {
+      continue;
+    }
+
+    seenIds.add(entry.id);
+    if (fingerprint.length > 5) {
+      seenFingerprints.add(fingerprint);
+    }
+    cleanList.push(entry);
+  }
+
+  return cleanList;
+}
+

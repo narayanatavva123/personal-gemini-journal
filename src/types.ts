@@ -26,6 +26,22 @@ export interface AiReflection {
   mode: 'deep-reflection' | 'socratic' | 'cognitive-reframe' | 'gratitude-strengths';
 }
 
+export interface ConversationMessage {
+  id: string;
+  role: 'user' | 'model';
+  content: string;
+  timestamp: string;
+}
+
+export interface ReflectionConversation {
+  id: string;
+  userId: string;
+  entryId: string;
+  messages: ConversationMessage[];
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface EntryLocation {
   latitude: number;
   longitude: number;
@@ -47,6 +63,7 @@ export interface JournalEntry {
   isFavorite: boolean;
   wordCount: number;
   reflection?: AiReflection;
+  conversation?: ReflectionConversation;
   location?: EntryLocation;
 }
 

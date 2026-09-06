@@ -23,7 +23,7 @@ import {
   type Firestore,
 } from 'firebase/firestore';
 import firebaseConfigData from '../../firebase-applet-config.json';
-import type { JournalEntry, UserNotificationSettings } from '../types.ts';
+import type { JournalEntry, UserNotificationSettings, ReflectionConversation } from '../types.ts';
 
 // Sanitize payload to strip any undefined values before sending to Firestore
 export function sanitizeForFirestore<T>(data: T): T {
@@ -154,10 +154,74 @@ export async function saveInteractionToFirestore(
           source: entry.location.source || 'coordinates-fallback',
         }
       : null,
+    conversation: entry.conversation
+      ? {
+          id: entry.conversation.id,
+          userId: entry.conversation.userId || userId,
+          entryId: entry.conversation.entryId || entry.id,
+          messages: Array.isArray(entry.conversation.messages) ? entry.conversation.messages : [],
+          createdAt: entry.conversation.createdAt || new Date().toISOString(),
+          updatedAt: entry.conversation.updatedAt || new Date().toISOString(),
+        }
+      : null,
     savedAt: new Date().toISOString(),
   });
 
   await setDoc(interactionRef, payload, { merge: true });
+
+  // If conversation is present, also write to subcollection for full structural alignment
+  if (entry.conversation && entry.conversation.messages?.length) {
+    await saveConversationSubcollection(userId, entry.id, entry.conversation).catch((err) => {
+      console.warn('Subcollection conversation write fallback:', err);
+    });
+  }
+}
+
+/**
+ * Save multi-turn conversation explicitly to owner-bound subcollection:
+ * /users/{userId}/interactions/{entryId}/reflectionConversation/{conversationId}
+ * and conceptual path /users/{userId}/entries/{entryId}/reflectionConversation/{conversationId}
+ */
+export async function saveConversationSubcollection(
+  userId: string,
+  entryId: string,
+  conversation: ReflectionConversation
+): Promise<void> {
+  if (!userId || !entryId || !conversation) return;
+
+  const convId = conversation.id || `conv-${entryId}`;
+  const cleanData = sanitizeForFirestore({
+    id: convId,
+    userId,
+    entryId,
+    messages: Array.isArray(conversation.messages) ? conversation.messages : [],
+    createdAt: conversation.createdAt || new Date().toISOString(),
+    updatedAt: conversation.updatedAt || new Date().toISOString(),
+  });
+
+  // 1. interactions subcollection
+  const interactionConvRef = doc(
+    db,
+    'users',
+    userId,
+    'interactions',
+    entryId,
+    'reflectionConversation',
+    convId
+  );
+  await setDoc(interactionConvRef, cleanData, { merge: true });
+
+  // 2. entries subcollection (for conceptual parity)
+  const entriesConvRef = doc(
+    db,
+    'users',
+    userId,
+    'entries',
+    entryId,
+    'reflectionConversation',
+    convId
+  );
+  await setDoc(entriesConvRef, cleanData, { merge: true }).catch(() => {});
 }
 
 // Fetch all owner-bound interactions for authenticated user
@@ -195,6 +259,16 @@ export async function fetchUserInteractions(userId: string): Promise<JournalEntr
             mode: data.reflection.mode || 'deep-reflection',
           }
         : undefined,
+      conversation: data.conversation
+        ? {
+            id: data.conversation.id || `conv-${data.id || docSnap.id}`,
+            userId: data.conversation.userId || userId,
+            entryId: data.conversation.entryId || data.id || docSnap.id,
+            messages: Array.isArray(data.conversation.messages) ? data.conversation.messages : [],
+            createdAt: data.conversation.createdAt || new Date().toISOString(),
+            updatedAt: data.conversation.updatedAt || new Date().toISOString(),
+          }
+        : undefined,
       location: data.location
         ? {
             latitude: data.location.latitude,
@@ -217,9 +291,46 @@ export async function deleteInteractionFromFirestore(
   userId: string,
   entryId: string
 ): Promise<void> {
-  if (!userId || !entryId) return;
-  const docRef = doc(db, 'users', userId, 'interactions', entryId);
-  await deleteDoc(docRef);
+  if (!userId || !entryId) {
+    throw new Error('User ID and Entry ID are required to delete a journal entry.');
+  }
+  try {
+    const docRef = doc(db, 'users', userId, 'interactions', entryId);
+    await deleteDoc(docRef);
+  } catch (err) {
+    console.error(`[Firebase] Failed to delete interaction ${entryId} for user ${userId}:`, err);
+    throw err;
+  }
+}
+
+// Check and mark user initialization in Firestore to prevent re-seeding deleted records
+export async function checkUserInitializedInFirestore(userId: string): Promise<boolean> {
+  if (!userId) return false;
+  try {
+    const userDocRef = doc(db, 'users', userId);
+    const snap = await getDoc(userDocRef);
+    return snap.exists();
+  } catch {
+    return false;
+  }
+}
+
+export async function markUserInitializedInFirestore(userId: string, email?: string | null): Promise<void> {
+  if (!userId) return;
+  try {
+    const userDocRef = doc(db, 'users', userId);
+    await setDoc(
+      userDocRef,
+      {
+        uid: userId,
+        email: email || null,
+        initializedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+  } catch (err) {
+    console.warn('[Firebase] Could not set user initialization document:', err);
+  }
 }
 
 // Fetch user notification preferences directly from owner-isolated Firestore path
