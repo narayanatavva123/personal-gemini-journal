@@ -1,4 +1,4 @@
-import { Shield, Key, EyeOff, Server, Download, Trash2, X, CheckCircle2 } from 'lucide-react';
+import { Shield, Key, EyeOff, Server, Download, Trash2, X, CheckCircle2, MapPin } from 'lucide-react';
 import type { JournalEntry, VaultConfig } from '../types.ts';
 
 interface PrivacyAuditModalProps {
@@ -123,6 +123,33 @@ export function PrivacyAuditModal({
             <div className="flex items-center gap-1.5 text-[11px] font-medium text-emerald-800 pt-1">
               <CheckCircle2 className="w-3.5 h-3.5" />
               <span>Owner isolation enforced</span>
+            </div>
+          </div>
+
+          {/* Card 5: On-Demand Location Privacy & Server-Side Maps Proxy */}
+          <div className="p-4 rounded-xl bg-white border border-[#E5E0D5] shadow-2xs space-y-2 sm:col-span-2">
+            <div className="flex items-center gap-2 text-[#24211D]">
+              <MapPin className="w-4 h-4 text-emerald-700" />
+              <h3 className="text-xs font-semibold uppercase tracking-wide">
+                On-Demand Location & Zero-Exposure Maps Integration
+              </h3>
+            </div>
+            <p className="text-xs text-[#6B6459] leading-relaxed">
+              Geolocation is never tracked silently or in the background. Location permissions are prompted strictly on explicit user action (&ldquo;Add Location&rdquo;). Reverse geocoding executes via server-side proxy where Google Maps API keys are fetched from Google Cloud Secret Manager. No Maps credentials or raw telemetry are ever sent to client browsers.
+            </p>
+            <div className="flex flex-wrap items-center gap-3 text-[11px] font-medium text-emerald-800 pt-1">
+              <div className="flex items-center gap-1">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>Explicit Opt-In Only</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>Zero Client-Side Maps Keys</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>Isolated User Document Storage</span>
+              </div>
             </div>
           </div>
         </div>

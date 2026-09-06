@@ -11,6 +11,7 @@ import {
   LogOut,
   User as UserIcon,
   Cloud,
+  Bell,
 } from 'lucide-react';
 import type { User } from 'firebase/auth';
 import type { VaultConfig } from '../types.ts';
@@ -19,11 +20,14 @@ interface HeaderProps {
   user: User | null;
   vaultConfig: VaultConfig;
   isUnlocked: boolean;
+  isAdmin: boolean;
   onLock: () => void;
   onOpenVaultSettings: () => void;
   onOpenPrivacyAudit: () => void;
   onOpenSynthesis: () => void;
   onOpenPrompts: () => void;
+  onOpenNotifications: () => void;
+  onOpenAdminDashboard: () => void;
   onNewEntry: () => void;
   onSignOut: () => void;
   streak: number;
@@ -33,11 +37,14 @@ export function Header({
   user,
   vaultConfig,
   isUnlocked,
+  isAdmin,
   onLock,
   onOpenVaultSettings,
   onOpenPrivacyAudit,
   onOpenSynthesis,
   onOpenPrompts,
+  onOpenNotifications,
+  onOpenAdminDashboard,
   onNewEntry,
   onSignOut,
   streak,
@@ -132,6 +139,34 @@ export function Header({
           >
             <span className="text-xs">✨</span>
             <span className="hidden sm:inline">Review</span>
+          </button>
+
+          {/* Notifications Opt-In Button */}
+          <button
+            id="open-notifications-btn"
+            type="button"
+            onClick={onOpenNotifications}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-[#5E584F] hover:text-[#1F1C18] hover:bg-[#F2ECE1] rounded-lg border border-transparent hover:border-[#E2DCCE] transition-all cursor-pointer"
+            title="Configure Email Notifications & Deliverability"
+          >
+            <Bell className="w-4 h-4 text-[#7B746A]" />
+            <span className="hidden md:inline">Alerts</span>
+          </button>
+
+          {/* Admin Console Button */}
+          <button
+            id="open-admin-dashboard-btn"
+            type="button"
+            onClick={onOpenAdminDashboard}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border transition-all cursor-pointer ${
+              isAdmin
+                ? 'text-amber-900 bg-amber-50 hover:bg-amber-100 border-amber-200'
+                : 'text-[#5E584F] hover:text-[#1F1C18] hover:bg-[#F2ECE1] border-transparent hover:border-[#E2DCCE]'
+            }`}
+            title="Open Administrative Console"
+          >
+            <Shield className={`w-3.5 h-3.5 ${isAdmin ? 'text-amber-700' : 'text-[#7B746A]'}`} />
+            <span className="hidden lg:inline">Admin</span>
           </button>
 
           {/* Vault Security / Lock Button */}

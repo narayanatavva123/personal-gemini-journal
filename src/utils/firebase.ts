@@ -14,6 +14,7 @@ import {
   collection,
   doc,
   setDoc,
+  getDoc,
   getDocs,
   deleteDoc,
   query,
@@ -22,7 +23,7 @@ import {
   type Firestore,
 } from 'firebase/firestore';
 import firebaseConfigData from '../../firebase-applet-config.json';
-import type { JournalEntry } from '../types.ts';
+import type { JournalEntry, UserNotificationSettings } from '../types.ts';
 
 // Sanitize payload to strip any undefined values before sending to Firestore
 export function sanitizeForFirestore<T>(data: T): T {
@@ -142,6 +143,17 @@ export async function saveInteractionToFirestore(
           mode: entry.reflection.mode || 'deep-reflection',
         }
       : null,
+    location: entry.location
+      ? {
+          latitude: entry.location.latitude,
+          longitude: entry.location.longitude,
+          name: entry.location.name || null,
+          formattedAddress: entry.location.formattedAddress || null,
+          accuracy: typeof entry.location.accuracy === 'number' ? entry.location.accuracy : null,
+          capturedAt: entry.location.capturedAt || new Date().toISOString(),
+          source: entry.location.source || 'coordinates-fallback',
+        }
+      : null,
     savedAt: new Date().toISOString(),
   });
 
@@ -183,6 +195,17 @@ export async function fetchUserInteractions(userId: string): Promise<JournalEntr
             mode: data.reflection.mode || 'deep-reflection',
           }
         : undefined,
+      location: data.location
+        ? {
+            latitude: data.location.latitude,
+            longitude: data.location.longitude,
+            name: data.location.name || undefined,
+            formattedAddress: data.location.formattedAddress || undefined,
+            accuracy: typeof data.location.accuracy === 'number' ? data.location.accuracy : undefined,
+            capturedAt: data.location.capturedAt || data.createdAt || new Date().toISOString(),
+            source: data.location.source || undefined,
+          }
+        : undefined,
     });
   });
 
@@ -197,4 +220,136 @@ export async function deleteInteractionFromFirestore(
   if (!userId || !entryId) return;
   const docRef = doc(db, 'users', userId, 'interactions', entryId);
   await deleteDoc(docRef);
+}
+
+// Fetch user notification preferences directly from owner-isolated Firestore path
+export async function fetchNotificationSettingsFromFirestore(
+  userId: string
+): Promise<UserNotificationSettings | null> {
+  if (!userId) return null;
+  try {
+    const docRef = doc(db, 'users', userId, 'settings', 'notifications');
+    const docSnap = await getDoc(docRef);
+    if (!docSnap.exists()) {
+      return null;
+    }
+    const data = docSnap.data();
+    const notificationEmail = data.notificationEmail || data.email || '';
+    const emailNotificationsEnabled =
+      typeof data.emailNotificationsEnabled === 'boolean'
+        ? data.emailNotificationsEnabled
+        : typeof data.enabled === 'boolean'
+        ? data.enabled
+        : false;
+    const reflectionReady = data.reflectionReady !== false;
+    const writingStreak =
+      typeof data.writingStreak === 'boolean'
+        ? data.writingStreak
+        : data.streakMilestone !== false;
+    const weeklySynthesis =
+      typeof data.weeklySynthesis === 'boolean'
+        ? data.weeklySynthesis
+        : data.weeklySummary !== false;
+    const inactivityNudge =
+      typeof data.inactivityNudge === 'boolean'
+        ? data.inactivityNudge
+        : Boolean(data.inactivityReminder);
+    const inactivityDays =
+      typeof data.inactivityDays === 'number' && data.inactivityDays > 0
+        ? data.inactivityDays
+        : 3;
+
+    return {
+      notificationEmail,
+      emailNotificationsEnabled,
+      reflectionReady,
+      writingStreak,
+      weeklySynthesis,
+      inactivityNudge,
+      inactivityDays,
+      updatedAt: data.updatedAt || new Date().toISOString(),
+      // Legacy compatibility aliases
+      email: notificationEmail,
+      enabled: emailNotificationsEnabled,
+      streakMilestone: writingStreak,
+      weeklySummary: weeklySynthesis,
+      inactivityReminder: inactivityNudge,
+    };
+  } catch (error) {
+    console.warn('Could not read user notification settings from Firestore:', error);
+    return null;
+  }
+}
+
+// Persist user notification preferences permanently to Firestore (/users/{userId}/settings/notifications)
+export async function saveNotificationSettingsToFirestore(
+  userId: string,
+  settings: Partial<UserNotificationSettings>
+): Promise<UserNotificationSettings> {
+  if (!userId) {
+    throw new Error('Cannot save notification preferences: Unauthenticated user.');
+  }
+
+  const docRef = doc(db, 'users', userId, 'settings', 'notifications');
+  const now = new Date().toISOString();
+
+  const notificationEmail = (settings.notificationEmail ?? settings.email ?? '').trim();
+  const emailNotificationsEnabled =
+    typeof settings.emailNotificationsEnabled === 'boolean'
+      ? settings.emailNotificationsEnabled
+      : typeof settings.enabled === 'boolean'
+      ? settings.enabled
+      : false;
+  const reflectionReady = settings.reflectionReady !== false;
+  const writingStreak =
+    typeof settings.writingStreak === 'boolean'
+      ? settings.writingStreak
+      : settings.streakMilestone !== false;
+  const weeklySynthesis =
+    typeof settings.weeklySynthesis === 'boolean'
+      ? settings.weeklySynthesis
+      : settings.weeklySummary !== false;
+  const inactivityNudge =
+    typeof settings.inactivityNudge === 'boolean'
+      ? settings.inactivityNudge
+      : Boolean(settings.inactivityReminder);
+  const inactivityDays =
+    typeof settings.inactivityDays === 'number' && settings.inactivityDays > 0
+      ? settings.inactivityDays
+      : 3;
+
+  const payload = sanitizeForFirestore({
+    notificationEmail,
+    emailNotificationsEnabled,
+    reflectionReady,
+    writingStreak,
+    weeklySynthesis,
+    inactivityNudge,
+    inactivityDays,
+    // Store legacy aliases as well so existing readers and backend services find them
+    email: notificationEmail,
+    enabled: emailNotificationsEnabled,
+    streakMilestone: writingStreak,
+    weeklySummary: weeklySynthesis,
+    inactivityReminder: inactivityNudge,
+    updatedAt: now,
+  });
+
+  await setDoc(docRef, payload, { merge: true });
+
+  return {
+    notificationEmail,
+    emailNotificationsEnabled,
+    reflectionReady,
+    writingStreak,
+    weeklySynthesis,
+    inactivityNudge,
+    inactivityDays,
+    email: notificationEmail,
+    enabled: emailNotificationsEnabled,
+    streakMilestone: writingStreak,
+    weeklySummary: weeklySynthesis,
+    inactivityReminder: inactivityNudge,
+    updatedAt: now,
+  };
 }

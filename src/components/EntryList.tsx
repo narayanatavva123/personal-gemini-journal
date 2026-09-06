@@ -12,6 +12,8 @@ import {
   Flame,
   X,
   Compass,
+  MapPin,
+  ExternalLink,
 } from 'lucide-react';
 import type { JournalEntry, MoodType } from '../types.ts';
 import { MOODS } from '../utils/storage.ts';
@@ -39,10 +41,12 @@ export function EntryList({
   const [selectedMood, setSelectedMood] = useState<MoodType | 'all'>('all');
   const [selectedTag, setSelectedTag] = useState<string | 'all'>('all');
   const [onlyFavorites, setOnlyFavorites] = useState(false);
+  const [onlyWithLocation, setOnlyWithLocation] = useState(false);
 
   // Compute statistics
   const totalWords = entries.reduce((acc, e) => acc + (e.wordCount || 0), 0);
   const reflectedCount = entries.filter((e) => Boolean(e.reflection)).length;
+  const locationCount = entries.filter((e) => Boolean(e.location)).length;
 
   // Extract all unique tags
   const allTags = Array.from(
@@ -51,13 +55,16 @@ export function EntryList({
 
   // Filter entries
   const filtered = entries.filter((entry) => {
-    // Search query matches title or content or tags
+    // Search query matches title or content or tags or location
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
       const matchTitle = entry.title.toLowerCase().includes(q);
       const matchContent = entry.content.toLowerCase().includes(q);
       const matchTag = entry.tags?.some((t) => t.toLowerCase().includes(q));
-      if (!matchTitle && !matchContent && !matchTag) return false;
+      const matchLocation =
+        entry.location?.name?.toLowerCase().includes(q) ||
+        entry.location?.formattedAddress?.toLowerCase().includes(q);
+      if (!matchTitle && !matchContent && !matchTag && !matchLocation) return false;
     }
 
     // Mood filter
@@ -72,6 +79,11 @@ export function EntryList({
 
     // Favorites only
     if (onlyFavorites && !entry.isFavorite) {
+      return false;
+    }
+
+    // Location only
+    if (onlyWithLocation && !entry.location) {
       return false;
     }
 
@@ -112,11 +124,11 @@ export function EntryList({
 
         <div className="space-y-1">
           <span className="text-[11px] uppercase tracking-wider font-semibold text-[#888175]">
-            Words Written
+            Places Saved
           </span>
           <div className="flex items-center gap-1.5 text-xl font-semibold text-[#24211D]">
-            <Compass className="w-5 h-5 text-[#5D5547]" />
-            <span>{totalWords.toLocaleString()}</span>
+            <MapPin className="w-5 h-5 text-amber-600" />
+            <span>{locationCount}</span>
           </div>
         </div>
 
@@ -142,7 +154,7 @@ export function EntryList({
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search thoughts, themes, or insights..."
+              placeholder="Search thoughts, themes, locations, or insights..."
               className="w-full pl-10 pr-9 py-2.5 bg-white border border-[#DCD5C8] rounded-xl text-xs sm:text-sm text-[#1F1C18] placeholder-[#9E978C] focus:outline-hidden focus:border-[#24211D] focus:ring-1 focus:ring-[#24211D]"
             />
             {searchQuery && (
@@ -156,7 +168,7 @@ export function EntryList({
             )}
           </div>
 
-          {/* Favorites Filter Toggle */}
+          {/* Favorites & Location Filter Toggles */}
           <div className="flex items-center gap-2">
             <button
               id="filter-favorites-btn"
@@ -170,6 +182,21 @@ export function EntryList({
             >
               <Star className={`w-3.5 h-3.5 ${onlyFavorites ? 'fill-amber-500 text-amber-500' : ''}`} />
               <span>Favorites</span>
+            </button>
+
+            <button
+              id="filter-location-btn"
+              type="button"
+              onClick={() => setOnlyWithLocation(!onlyWithLocation)}
+              className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium border transition-colors ${
+                onlyWithLocation
+                  ? 'bg-[#24211D] border-[#24211D] text-white'
+                  : 'bg-white border-[#DCD5C8] text-[#5D5547] hover:bg-[#F9F7F3]'
+              }`}
+              title="Filter entries with attached locations"
+            >
+              <MapPin className={`w-3.5 h-3.5 ${onlyWithLocation ? 'text-amber-300' : 'text-[#888175]'}`} />
+              <span>Places {locationCount > 0 && `(${locationCount})`}</span>
             </button>
 
             {/* Prompt Helper CTA */}
@@ -391,6 +418,35 @@ export function EntryList({
                 <h3 className="text-lg font-editorial font-semibold text-[#1F1C18] group-hover:text-[#383126] transition-colors leading-snug">
                   {entry.title || 'Untitled Reflection'}
                 </h3>
+
+                {/* Location Badge if attached */}
+                {entry.location && (
+                  <div
+                    id={`entry-location-badge-${entry.id}`}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#FAF6F0] border border-[#E7E0D2] text-xs text-[#524B40] max-w-full"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <MapPin className="w-3.5 h-3.5 text-[#887F72] shrink-0" />
+                    <span className="font-medium text-[#2E2820] truncate max-w-[200px] sm:max-w-xs">
+                      {entry.location.name || `${entry.location.latitude.toFixed(4)}, ${entry.location.longitude.toFixed(4)}`}
+                    </span>
+                    {entry.location.formattedAddress && entry.location.formattedAddress !== entry.location.name && (
+                      <span className="text-[11px] text-[#827A6D] hidden md:inline truncate max-w-[180px]">
+                        • {entry.location.formattedAddress}
+                      </span>
+                    )}
+                    <a
+                      id={`maps-link-${entry.id}`}
+                      href={`https://www.google.com/maps/search/?api=1&query=${entry.location.latitude},${entry.location.longitude}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-amber-800 hover:text-amber-900 ml-1 inline-flex items-center gap-0.5 hover:underline"
+                      title="Open in Google Maps (opens in new tab)"
+                    >
+                      <ExternalLink className="w-3 h-3" />
+                    </a>
+                  </div>
+                )}
 
                 {/* Excerpt */}
                 <p className="text-xs sm:text-sm font-editorial text-[15px] leading-relaxed text-[#595246] line-clamp-2">

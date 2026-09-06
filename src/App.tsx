@@ -8,7 +8,9 @@ import { VaultModal } from './components/VaultModal.tsx';
 import { PrivacyAuditModal } from './components/PrivacyAuditModal.tsx';
 import { PromptModal } from './components/PromptModal.tsx';
 import { SynthesisModal } from './components/SynthesisModal.tsx';
-import type { JournalEntry, VaultConfig, MoodType, ViewMode } from './types.ts';
+import { AdminDashboard } from './components/AdminDashboard.tsx';
+import { NotificationSettingsModal } from './components/NotificationSettingsModal.tsx';
+import type { JournalEntry, VaultConfig, MoodType, ViewMode, UserAuthProfile } from './types.ts';
 import {
   getVaultConfig,
   saveVaultConfig,
@@ -22,12 +24,15 @@ import {
   saveInteractionToFirestore,
   fetchUserInteractions,
   deleteInteractionFromFirestore,
+  fetchNotificationSettingsFromFirestore,
 } from './utils/firebase.ts';
+import { checkUserRole, triggerNotificationEvent, saveNotificationSettings } from './utils/apiClient.ts';
 import { Lock, RefreshCw, BookOpen } from 'lucide-react';
 
 export default function App() {
   // Auth state
   const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [userProfile, setUserProfile] = useState<UserAuthProfile | null>(null);
   const [authLoading, setAuthLoading] = useState<boolean>(true);
 
   // Journal and vault states
@@ -44,6 +49,7 @@ export default function App() {
   const [isPrivacyAuditOpen, setIsPrivacyAuditOpen] = useState(false);
   const [isPromptsOpen, setIsPromptsOpen] = useState(false);
   const [isSynthesisOpen, setIsSynthesisOpen] = useState(false);
+  const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
 
   // Inactivity tracking
   const lastActiveRef = useRef<number>(Date.now());
@@ -55,6 +61,15 @@ export default function App() {
       setAuthLoading(false);
 
       if (user) {
+        // Verify user role with server-side RBAC
+        checkUserRole()
+          .then((profile) => {
+            setUserProfile(profile);
+          })
+          .catch((err) => {
+            console.warn('Role verification pass:', err);
+          });
+
         // Authenticated user: Load owner-bound Firestore data
         setIsSyncing(true);
         try {
@@ -76,6 +91,16 @@ export default function App() {
               setEntries([]);
             }
           }
+
+          // Sync notification preferences to ensure server cache has latest settings
+          try {
+            const notifSettings = await fetchNotificationSettingsFromFirestore(user.uid);
+            if (notifSettings) {
+              await saveNotificationSettings(notifSettings);
+            }
+          } catch (notifErr) {
+            console.debug('Notification settings sync note:', notifErr);
+          }
         } catch (err) {
           console.error('Failed to load user interactions from Firestore:', err);
           // Fallback to local storage
@@ -86,6 +111,7 @@ export default function App() {
         }
       } else {
         // Logged out: Clear memory state for data isolation
+        setUserProfile(null);
         setEntries([]);
         setSelectedEntry(null);
         setViewMode('list');
@@ -189,13 +215,17 @@ export default function App() {
   };
 
   // Save entry (Firestore primary + Local backup)
-  const handleSaveEntry = async (entryToSave: JournalEntry): Promise<void> => {
+  const handleSaveEntry = async (
+    entryToSave: JournalEntry,
+    options?: { keepOpen?: boolean; isNewReflection?: boolean }
+  ): Promise<void> => {
     // 1. If user is authenticated, save to Firestore with owner-bound isolation
     if (currentUser) {
       await saveInteractionToFirestore(currentUser.uid, entryToSave);
     }
 
     // 2. Update React state
+    const previousStreak = calculateStreak(entries);
     const exists = entries.some((e) => e.id === entryToSave.id);
     const updated = exists
       ? entries.map((e) => (e.id === entryToSave.id ? entryToSave : e))
@@ -204,8 +234,40 @@ export default function App() {
 
     // 3. Keep local encrypted/plain backup
     await saveEntries(updated, activePasscode || undefined);
-    setSelectedEntry(null);
-    setViewMode('list');
+
+    // 4. Opt-in event notifications (Strictly zero-PII event trigger)
+    // Dispatch reflection_ready notification when a new Gemini reflection is generated and saved
+    if (options?.isNewReflection) {
+      console.log('[App] New Gemini Reflection generated and saved. Triggering reflection_ready notification...');
+      triggerNotificationEvent('reflection_ready')
+        .then((res) => {
+          console.log('[App] reflection_ready notification result:', res);
+        })
+        .catch((err) => {
+          console.warn('[App] reflection_ready notification error:', err);
+        });
+    }
+
+    // Writing streak milestones: only dispatch when streak reaches configured milestone (3, 7, 14, 30)
+    const currentStreak = calculateStreak(updated);
+    const MILESTONES = [3, 7, 14, 30];
+    if (MILESTONES.includes(currentStreak) && currentStreak !== previousStreak) {
+      console.log(`[App] Writing streak milestone reached: ${currentStreak} days. Triggering notification...`);
+      triggerNotificationEvent('streak_milestone', { streak: currentStreak })
+        .then((res) => {
+          console.log('[App] streak_milestone notification result:', res);
+        })
+        .catch((err) => {
+          console.warn('[App] streak_milestone notification error:', err);
+        });
+    }
+
+    if (options?.keepOpen) {
+      setSelectedEntry(entryToSave);
+    } else {
+      setSelectedEntry(null);
+      setViewMode('list');
+    }
   };
 
   // Delete entry
@@ -409,11 +471,14 @@ export default function App() {
         user={currentUser}
         vaultConfig={vaultConfig}
         isUnlocked={isUnlocked}
+        isAdmin={Boolean(userProfile?.isAdmin)}
         onLock={handleLockVault}
         onOpenVaultSettings={() => setIsVaultModalOpen(true)}
         onOpenPrivacyAudit={() => setIsPrivacyAuditOpen(true)}
         onOpenSynthesis={() => setIsSynthesisOpen(true)}
         onOpenPrompts={() => setIsPromptsOpen(true)}
+        onOpenNotifications={() => setIsNotificationsOpen(true)}
+        onOpenAdminDashboard={() => setViewMode('admin')}
         onNewEntry={() => {
           setSelectedEntry(null);
           setViewMode('editor');
@@ -432,8 +497,13 @@ export default function App() {
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-8 py-6 sm:py-8">
-        {/* If vault is locked, display lock screen barrier */}
-        {vaultConfig.useEncryption && !isUnlocked ? (
+        {/* Admin Dashboard view */}
+        {viewMode === 'admin' ? (
+          <AdminDashboard
+            userProfile={userProfile}
+            onBackToJournal={() => setViewMode('list')}
+          />
+        ) : vaultConfig.useEncryption && !isUnlocked ? (
           <div
             id="locked-vault-banner"
             className="my-12 max-w-md mx-auto p-8 rounded-2xl bg-white border border-[#E2DCCE] text-center shadow-sm space-y-4"
@@ -543,6 +613,12 @@ export default function App() {
         isOpen={isSynthesisOpen}
         onClose={() => setIsSynthesisOpen(false)}
         entries={entries}
+      />
+
+      <NotificationSettingsModal
+        isOpen={isNotificationsOpen}
+        onClose={() => setIsNotificationsOpen(false)}
+        userEmail={currentUser?.email}
       />
     </div>
   );

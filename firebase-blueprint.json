@@ -55,6 +55,10 @@
           "type": "object",
           "description": "Gemini reflection data"
         },
+        "location": {
+          "type": "object",
+          "description": "Optional attached geolocation metadata (latitude, longitude, name, formattedAddress, accuracy, capturedAt)"
+        },
         "savedAt": {
           "type": "string",
           "format": "date-time",
@@ -62,12 +66,127 @@
         }
       },
       "required": ["id", "userId", "type", "createdAt", "updatedAt"]
+    },
+    "userNotificationSettings": {
+      "title": "User Notification Preferences",
+      "description": "User-configured opt-in notification settings and event subscriptions.",
+      "type": "object",
+      "properties": {
+        "notificationEmail": {
+          "type": "string",
+          "description": "User configured destination email for notifications"
+        },
+        "emailNotificationsEnabled": {
+          "type": "boolean",
+          "description": "Master toggle for external email notifications"
+        },
+        "reflectionReady": {
+          "type": "boolean",
+          "description": "Notify when a Gemini reflection is generated"
+        },
+        "writingStreak": {
+          "type": "boolean",
+          "description": "Notify upon reaching consecutive journaling streak milestones"
+        },
+        "weeklySynthesis": {
+          "type": "boolean",
+          "description": "Notify with weekly macro activity synthesis"
+        },
+        "inactivityNudge": {
+          "type": "boolean",
+          "description": "Gentle nudge when user has not written for configured days"
+        },
+        "inactivityDays": {
+          "type": "number",
+          "description": "Number of days before inactivity reminder triggers"
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Legacy alias for emailNotificationsEnabled"
+        },
+        "email": {
+          "type": "string",
+          "description": "Legacy alias for notificationEmail"
+        },
+        "weeklySummary": {
+          "type": "boolean",
+          "description": "Legacy alias for weeklySynthesis"
+        },
+        "streakMilestone": {
+          "type": "boolean",
+          "description": "Legacy alias for writingStreak"
+        },
+        "inactivityReminder": {
+          "type": "boolean",
+          "description": "Legacy alias for inactivityNudge"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last updated ISO timestamp"
+        }
+      },
+      "required": ["updatedAt"]
+    },
+    "adminRole": {
+      "title": "Admin Role Assignment",
+      "description": "Server-authoritative role binding for administrative access control.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Firebase UID of the authorized administrator"
+        },
+        "role": {
+          "type": "string",
+          "description": "Assigned role level: admin or superadmin"
+        },
+        "assignedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when admin status was provisioned"
+        }
+      },
+      "required": ["userId", "role"]
+    },
+    "adminAuditLog": {
+      "title": "Admin System Telemetry Log",
+      "description": "Privacy-safe anonymized system activity telemetry for aggregate dashboard monitoring.",
+      "type": "object",
+      "properties": {
+        "eventType": {
+          "type": "string",
+          "description": "Category of system event, e.g. reflection_generated, notification_dispatched"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO timestamp of the event"
+        },
+        "details": {
+          "type": "string",
+          "description": "Non-sensitive abstract event description"
+        }
+      },
+      "required": ["eventType", "timestamp"]
     }
   },
   "firestore": {
     "/users/{userId}/interactions/{interactionId}": {
       "schema": "interaction",
       "description": "Owner-bound private journal reflections and Gemini interactions"
+    },
+    "/users/{userId}/settings/notifications": {
+      "schema": "userNotificationSettings",
+      "description": "Owner-bound privacy-safe notification preferences"
+    },
+    "/admin_roles/{userId}": {
+      "schema": "adminRole",
+      "description": "Server-authoritative admin role registrations"
+    },
+    "/admin_audit_logs/{logId}": {
+      "schema": "adminAuditLog",
+      "description": "Privacy-safe macro-level system telemetry records"
     }
   }
 }

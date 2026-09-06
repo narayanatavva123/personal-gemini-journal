@@ -21,15 +21,17 @@ import {
   PlusCircle,
   AlertCircle,
   RefreshCw,
-  CloudCheck,
+  MapPin,
+  ExternalLink,
+  X,
 } from 'lucide-react';
-import type { JournalEntry, MoodType, AiReflection } from '../types.ts';
+import type { JournalEntry, MoodType, AiReflection, EntryLocation } from '../types.ts';
 import { MOODS } from '../utils/storage.ts';
 import { redactPII } from '../utils/crypto.ts';
 
 interface EntryEditorProps {
   entry: JournalEntry | null;
-  onSave: (entry: JournalEntry) => Promise<void>;
+  onSave: (entry: JournalEntry, options?: { keepOpen?: boolean; isNewReflection?: boolean }) => Promise<void>;
   onBack: () => void;
 }
 
@@ -43,6 +45,12 @@ export function EntryEditor({ entry, onSave, onBack }: EntryEditorProps) {
   const [newTagInput, setNewTagInput] = useState('');
   const [isFavorite, setIsFavorite] = useState(entry?.isFavorite || false);
   const [reflection, setReflection] = useState<AiReflection | undefined>(entry?.reflection);
+
+  // Geolocation state
+  const [location, setLocation] = useState<EntryLocation | undefined>(entry?.location);
+  const [isLocating, setIsLocating] = useState(false);
+  const [locationError, setLocationError] = useState<string | null>(null);
+  const [locationSuccessNotice, setLocationSuccessNotice] = useState<string | null>(null);
 
   // Reflection options
   const [reflectionMode, setReflectionMode] = useState<
@@ -72,9 +80,12 @@ export function EntryEditor({ entry, onSave, onBack }: EntryEditorProps) {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [title, content, mood, tags, isFavorite, reflection]);
+  }, [title, content, mood, tags, isFavorite, reflection, location]);
 
-  const handleSave = async (overrideReflection?: AiReflection) => {
+  const handleSave = async (
+    overrideReflection?: AiReflection,
+    options?: { keepOpen?: boolean; isNewReflection?: boolean }
+  ) => {
     setSaveError(null);
     setSaveSuccessNotice(null);
     setIsSaving(true);
@@ -91,11 +102,12 @@ export function EntryEditor({ entry, onSave, onBack }: EntryEditorProps) {
       isFavorite,
       wordCount: words,
       reflection: overrideReflection !== undefined ? overrideReflection : reflection,
+      location,
     };
 
     try {
-      await onSave(finalEntry);
-      setSaveSuccessNotice('Entry safely persisted to your private Firestore vault.');
+      await onSave(finalEntry, options);
+      setSaveSuccessNotice('Entry and reflection safely persisted to your private Firestore vault.');
       setTimeout(() => setSaveSuccessNotice(null), 4000);
     } catch (err: any) {
       console.error('Save failed:', err);
@@ -104,6 +116,104 @@ export function EntryEditor({ entry, onSave, onBack }: EntryEditorProps) {
     } finally {
       setIsSaving(false);
     }
+  };
+
+  /**
+   * Explicit user-triggered location capture.
+   * Prompts browser permission only upon clicking 'Add Location'.
+   */
+  const handleAddLocation = () => {
+    setLocationError(null);
+    setLocationSuccessNotice(null);
+
+    if (!navigator.geolocation) {
+      setLocationError('Geolocation is not supported by your browser environment.');
+      return;
+    }
+
+    setIsLocating(true);
+
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        const { latitude, longitude, accuracy } = position.coords;
+        try {
+          // Call secure server-side reverse-geocode proxy (keeps Google Maps API keys hidden)
+          const res = await fetch('/api/location/reverse-geocode', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              latitude,
+              longitude,
+              accuracy: accuracy || undefined,
+            }),
+          });
+
+          if (!res.ok) {
+            throw new Error('Reverse geocoding proxy returned an error');
+          }
+
+          const data = await res.json();
+          const newLoc: EntryLocation = {
+            latitude: data.latitude,
+            longitude: data.longitude,
+            name: data.name,
+            formattedAddress: data.formattedAddress,
+            accuracy: data.accuracy,
+            capturedAt: data.capturedAt || new Date().toISOString(),
+            source: data.source,
+          };
+
+          setLocation(newLoc);
+          setLocationSuccessNotice(`Attached: ${newLoc.name || 'Current Location'}`);
+          setTimeout(() => setLocationSuccessNotice(null), 4000);
+        } catch {
+          // Network or API failure fallback: store validated coordinates gracefully
+          const fallbackName = `${Math.abs(latitude).toFixed(2)}° ${latitude >= 0 ? 'N' : 'S'}, ${Math.abs(longitude).toFixed(2)}° ${longitude >= 0 ? 'E' : 'W'}`;
+          const newLoc: EntryLocation = {
+            latitude,
+            longitude,
+            name: fallbackName,
+            formattedAddress: `Coordinates: ${latitude.toFixed(4)}, ${longitude.toFixed(4)}`,
+            accuracy: accuracy || undefined,
+            capturedAt: new Date().toISOString(),
+            source: 'coordinates-fallback',
+          };
+          setLocation(newLoc);
+          setLocationSuccessNotice('Coordinates attached.');
+          setTimeout(() => setLocationSuccessNotice(null), 4000);
+        } finally {
+          setIsLocating(false);
+        }
+      },
+      (error) => {
+        setIsLocating(false);
+        switch (error.code) {
+          case error.PERMISSION_DENIED:
+            setLocationError('Location permission was denied. Allow location access in browser or iframe settings to attach your location.');
+            break;
+          case error.POSITION_UNAVAILABLE:
+            setLocationError('Location information is unavailable from your device or network.');
+            break;
+          case error.TIMEOUT:
+            setLocationError('Location request timed out. Please try again.');
+            break;
+          default:
+            setLocationError(error.message || 'Unable to retrieve your location.');
+            break;
+        }
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 12000,
+        maximumAge: 0,
+      }
+    );
+  };
+
+  const handleRemoveLocation = () => {
+    setLocation(undefined);
+    setLocationSuccessNotice(null);
+    setLocationError(null);
   };
 
   const handleAddTag = (tagToAdd: string) => {
@@ -185,7 +295,7 @@ export function EntryEditor({ entry, onSave, onBack }: EntryEditorProps) {
       setReflection(newRef);
 
       // Auto-save user input and Gemini reflection to Firestore immediately to guarantee persistence
-      await handleSave(newRef);
+      await handleSave(newRef, { keepOpen: true, isNewReflection: true });
     } catch (err: any) {
       setReflectionError(err.message || 'Reflection request failed');
     } finally {
@@ -338,6 +448,123 @@ export function EntryEditor({ entry, onSave, onBack }: EntryEditorProps) {
             className="w-full text-2xl sm:text-3xl font-editorial font-medium text-[#1F1C18] placeholder-[#9E978C] bg-transparent border-0 border-b border-transparent hover:border-[#E8E3DA] focus:border-[#24211D] focus:outline-hidden pb-2 transition-colors"
           />
         </div>
+
+        {/* Location Section */}
+        <div id="entry-location-bar" className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl bg-white border border-[#E5E0D5] text-xs">
+          <div className="flex items-center gap-2 min-w-0">
+            <MapPin className="w-4 h-4 text-[#8C8476] shrink-0" />
+            {location ? (
+              <div className="flex flex-wrap items-center gap-1.5 text-[#2E2A24]">
+                <span className="font-medium text-[#1F1C18]">
+                  {location.name || `${location.latitude.toFixed(4)}, ${location.longitude.toFixed(4)}`}
+                </span>
+                {location.formattedAddress && location.formattedAddress !== location.name && (
+                  <span className="text-[11px] text-[#787163] hidden sm:inline">
+                    ({location.formattedAddress})
+                  </span>
+                )}
+                {typeof location.accuracy === 'number' && (
+                  <span className="text-[10px] text-[#8C8476] bg-[#F4EFE6] px-1.5 py-0.5 rounded">
+                    ±{Math.round(location.accuracy)}m
+                  </span>
+                )}
+                <a
+                  id="view-on-google-maps-link"
+                  href={`https://www.google.com/maps/search/?api=1&query=${location.latitude},${location.longitude}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-0.5 text-[11px] text-amber-800 hover:text-amber-900 underline ml-1"
+                  title="Open location in Google Maps (opens in new tab)"
+                >
+                  <span>Google Maps</span>
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+              </div>
+            ) : (
+              <span className="text-[#888175]">
+                Optional: attach your current location to this journal entry
+              </span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            {location ? (
+              <div className="flex items-center gap-1.5">
+                <button
+                  id="update-location-btn"
+                  type="button"
+                  onClick={handleAddLocation}
+                  disabled={isLocating}
+                  className="px-2 py-1 text-[11px] font-medium text-[#5E5648] hover:text-[#1F1C18] hover:bg-[#F2ECE1] rounded transition-colors disabled:opacity-50"
+                  title="Update to current location"
+                >
+                  {isLocating ? 'Updating...' : 'Update'}
+                </button>
+                <button
+                  id="remove-location-btn"
+                  type="button"
+                  onClick={handleRemoveLocation}
+                  className="px-2 py-1 text-[11px] font-medium text-red-700 hover:bg-red-50 rounded transition-colors flex items-center gap-1"
+                  title="Detach location from entry"
+                >
+                  <X className="w-3 h-3" />
+                  <span>Remove</span>
+                </button>
+              </div>
+            ) : (
+              <button
+                id="add-location-btn"
+                type="button"
+                onClick={handleAddLocation}
+                disabled={isLocating}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-[#FAF7F2] hover:bg-[#F0ECE3] border border-[#DDD6C8] text-[#3D372F] rounded-lg text-xs font-medium transition-colors shadow-2xs disabled:opacity-50"
+                title="Attach current location (requests browser permission)"
+              >
+                <MapPin className={`w-3.5 h-3.5 ${isLocating ? 'animate-bounce text-amber-600' : 'text-[#7A7367]'}`} />
+                <span>{isLocating ? 'Acquiring GPS...' : 'Add Location'}</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Location Alerts */}
+        {locationError && (
+          <div
+            id="location-error-banner"
+            className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 flex items-start justify-between gap-2"
+          >
+            <div className="flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+              <span>{locationError}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setLocationError(null)}
+              className="text-rose-600 hover:text-rose-900 p-0.5"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
+        {locationSuccessNotice && (
+          <div
+            id="location-success-banner"
+            className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800 flex items-center justify-between gap-2"
+          >
+            <div className="flex items-center gap-2">
+              <Check className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span>{locationSuccessNotice}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setLocationSuccessNotice(null)}
+              className="text-emerald-600 hover:text-emerald-900 p-0.5"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
 
         {/* Markdown Toolbar */}
         <div className="flex flex-wrap items-center justify-between gap-2 p-1.5 bg-[#F4EFE6] border border-[#E2DCCE] rounded-lg text-xs text-[#5E574B]">
